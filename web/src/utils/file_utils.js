@@ -1,4 +1,3 @@
-// 文件相关工具函数
 import {
   FileTextFilled,
   FileMarkdownFilled,
@@ -6,175 +5,93 @@ import {
   FileWordFilled,
   FileExcelFilled,
   FileImageFilled,
-  FileUnknownFilled,
+  FileFilled,
   FilePptFilled,
+  FileZipFilled,
   LinkOutlined,
-  CodeFilled,
-  FileFilled
+  CodeFilled
 } from '@ant-design/icons-vue'
 import { formatRelative, parseToShanghai } from '@/utils/time'
 
-// 根据文件扩展名获取文件图标
-export const getFileIcon = (filename) => {
-  if (!filename) return FileFilled
+const DEFAULT_FILE_ICON = { icon: FileFilled, color: 'var(--gray-600)' }
+const LINK_FILE_ICON = { icon: LinkOutlined, color: 'var(--color-info-500)' }
 
-  // Check if it's a URL
-  if (filename.startsWith('http://') || filename.startsWith('https://')) {
-    return LinkOutlined
-  }
-
-  const extension = filename.toLowerCase().split('.').pop()
-
-  const iconMap = {
-    // 文本文件与常规文档
-    txt: FileTextFilled,
-    text: FileTextFilled,
-    log: FileTextFilled,
-    pdf: FilePdfFilled,
-    doc: FileWordFilled,
-    docx: FileWordFilled,
-    xls: FileExcelFilled,
-    xlsx: FileExcelFilled,
-    csv: FileExcelFilled,
-    ppt: FilePptFilled,
-    pptx: FilePptFilled,
-
-    // Markdown文件
-    md: FileMarkdownFilled,
-    markdown: FileMarkdownFilled,
-
-    // 图片文件
-    jpg: FileImageFilled,
-    jpeg: FileImageFilled,
-    png: FileImageFilled,
-    gif: FileImageFilled,
-    bmp: FileImageFilled,
-    svg: FileImageFilled,
-    webp: FileImageFilled,
-
-    // 代码文件
-    py: CodeFilled,
-    js: CodeFilled,
-    ts: CodeFilled,
-    vue: CodeFilled,
-    sh: CodeFilled,
-    go: CodeFilled,
-    cpp: CodeFilled,
-    c: CodeFilled,
-    h: CodeFilled,
-    java: CodeFilled,
-    html: CodeFilled,
-    htm: CodeFilled,
-    css: CodeFilled,
-    less: CodeFilled,
-    scss: CodeFilled,
-    sql: CodeFilled,
-
-    // 配置文件与数据结构
-    json: FileTextFilled,
-    yaml: FileTextFilled,
-    yml: FileTextFilled,
-    toml: FileTextFilled,
-    ini: FileTextFilled,
-    conf: FileTextFilled,
-    env: FileTextFilled
-  }
-
-  return iconMap[extension] || FileFilled
+const FILE_ICON_CONFIG = {
+  txt: { icon: FileTextFilled, color: 'var(--color-info-500)' },
+  text: { icon: FileTextFilled, color: 'var(--color-info-500)' },
+  log: { icon: FileTextFilled, color: 'var(--color-info-500)' },
+  md: { icon: FileMarkdownFilled, color: 'var(--gray-700)' },
+  markdown: { icon: FileMarkdownFilled, color: 'var(--gray-700)' },
+  pdf: { icon: FilePdfFilled, color: 'var(--color-error-500)' },
+  doc: { icon: FileWordFilled, color: 'var(--color-info-700)' },
+  docx: { icon: FileWordFilled, color: 'var(--color-info-700)' },
+  xls: { icon: FileExcelFilled, color: 'var(--color-success-500)' },
+  xlsx: { icon: FileExcelFilled, color: 'var(--color-success-500)' },
+  csv: { icon: FileExcelFilled, color: 'var(--color-success-500)' },
+  ppt: { icon: FilePptFilled, color: 'var(--color-warning-700)' },
+  pptx: { icon: FilePptFilled, color: 'var(--color-warning-700)' },
+  jpg: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  jpeg: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  png: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  gif: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  bmp: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  svg: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  webp: { icon: FileImageFilled, color: 'var(--color-accent-700)' },
+  zip: { icon: FileZipFilled, color: 'var(--gray-700)' },
+  rar: { icon: FileZipFilled, color: 'var(--gray-700)' },
+  '7z': { icon: FileZipFilled, color: 'var(--gray-700)' },
+  tar: { icon: FileZipFilled, color: 'var(--gray-700)' },
+  gz: { icon: FileZipFilled, color: 'var(--gray-700)' },
+  py: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  js: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  jsx: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  ts: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  tsx: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  vue: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  sh: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  go: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  rs: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  cpp: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  c: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  h: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  java: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  html: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  htm: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  css: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  less: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  scss: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  sql: { icon: CodeFilled, color: 'var(--color-primary-700)' },
+  json: { icon: FileTextFilled, color: 'var(--color-primary-700)' },
+  yaml: { icon: FileTextFilled, color: 'var(--color-primary-700)' },
+  yml: { icon: FileTextFilled, color: 'var(--color-primary-700)' },
+  toml: { icon: FileTextFilled, color: 'var(--color-primary-700)' },
+  ini: { icon: FileTextFilled, color: 'var(--color-primary-700)' },
+  conf: { icon: FileTextFilled, color: 'var(--color-primary-700)' },
+  env: { icon: FileTextFilled, color: 'var(--color-primary-700)' }
 }
 
-// 根据文件扩展名获取文件图标颜色
-export const getFileIconColor = (filename) => {
-  if (!filename) return '#8c8c8c'
+const getFileIconConfig = (filename) => {
+  const normalizedName = String(filename || '').trim().toLowerCase()
+  if (!normalizedName) return DEFAULT_FILE_ICON
+  if (normalizedName.startsWith('http://') || normalizedName.startsWith('https://')) return LINK_FILE_ICON
 
-  // Check if it's a URL
-  if (filename.startsWith('http://') || filename.startsWith('https://')) {
-    return '#1890ff' // Blue for links
-  }
-
-  const extension = filename.toLowerCase().split('.').pop()
-
-  const colorMap = {
-    // 文本文件 - 蓝色
-    txt: '#1890ff',
-    text: '#1890ff',
-    log: '#1890ff',
-
-    // Markdown文件 - 深灰色
-    md: '#595959',
-    markdown: '#595959',
-
-    // PDF文件 - 红色
-    pdf: '#ff4d4f',
-
-    // Word文档 - 深蓝色
-    doc: '#2f54eb',
-    docx: '#2f54eb',
-
-    // Excel文档 - 绿色
-    xls: '#52c41a',
-    xlsx: '#52c41a',
-    csv: '#52c41a',
-
-    // PPT文档 - 橙色
-    ppt: '#f6720d',
-    pptx: '#f6720d',
-
-    // 图片文件 - 紫色
-    jpg: '#722ed1',
-    jpeg: '#722ed1',
-    png: '#722ed1',
-    gif: '#722ed1',
-    bmp: '#722ed1',
-    svg: '#722ed1',
-    webp: '#722ed1',
-
-    // 前端与样式文件 - 橙黄色
-    js: '#fa8c16',
-    ts: '#fa8c16',
-    vue: '#fa8c16',
-    html: '#fa8c16',
-    htm: '#fa8c16',
-    css: '#fa8c16',
-    less: '#fa8c16',
-    scss: '#fa8c16',
-
-    // 后端核心代码文件 - 亮天蓝
-    py: '#1890ff',
-    go: '#1890ff',
-    java: '#1890ff',
-    cpp: '#1890ff',
-    c: '#1890ff',
-    h: '#1890ff',
-
-    // 配置文件 - 青色
-    json: '#13c2c2',
-    yaml: '#13c2c2',
-    yml: '#13c2c2',
-    toml: '#13c2c2',
-    ini: '#13c2c2',
-    conf: '#13c2c2',
-    env: '#13c2c2',
-
-    // 脚本文件 - 中灰
-    sh: '#595959',
-    sql: '#595959'
-  }
-
-  return colorMap[extension] || '#8c8c8c'
+  const cleanName = normalizedName.split(/[?#]/)[0]
+  const extension = cleanName.includes('.') ? cleanName.split('.').pop() : cleanName
+  return FILE_ICON_CONFIG[extension] || DEFAULT_FILE_ICON
 }
 
-// Format relative time with CST baseline
+export const getFileIcon = (filename) => getFileIconConfig(filename).icon
+
+export const getFileIconColor = (filename) => getFileIconConfig(filename).color
+
 export const formatRelativeTime = (value) => formatRelative(value)
 
-// 格式化标准时间
 export const formatStandardTime = (value) => {
   const parsed = parseToShanghai(value)
   if (!parsed) return '-'
   return parsed.format('YYYY年MM月DD日 HH:mm:ss')
 }
 
-// 获取状态文本
 export const getStatusText = (status) => {
   const statusMap = {
     done: '处理完成',
@@ -185,7 +102,6 @@ export const getStatusText = (status) => {
   return statusMap[status] || status
 }
 
-// 格式化文件大小
 export const formatFileSize = (bytes) => {
   if (bytes === 0 || bytes === '0') return '0 B'
   if (!bytes) return '-'
