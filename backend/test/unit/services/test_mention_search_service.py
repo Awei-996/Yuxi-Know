@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 import pytest
 
@@ -41,7 +42,6 @@ def mock_sandbox_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mention_service, "sandbox_workspace_dir", lambda t, u: workspace_dir)
     monkeypatch.setattr(mention_service, "sandbox_uploads_dir", lambda t: uploads_dir)
     monkeypatch.setattr(mention_service, "sandbox_outputs_dir", lambda t: outputs_dir)
-    monkeypatch.setattr(mention_service, "ensure_thread_dirs", lambda t, u: None)
 
     return {
         "workspace": workspace_dir,
@@ -140,7 +140,7 @@ async def test_mention_cache_lifecycle_with_ormsgpack(mock_sandbox_paths, fake_r
     assert cached_str is not None
     
     # 反序列化校验
-    packed_bytes = cached_str.encode("latin1")
+    packed_bytes = base64.b64decode(cached_str)
     decoded_entries = ormsgpack.unpackb(packed_bytes)
     assert len(decoded_entries) == 2
 

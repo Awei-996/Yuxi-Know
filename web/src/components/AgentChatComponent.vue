@@ -255,7 +255,6 @@ import { useAgentRunStream } from '@/composables/useAgentRunStream'
 import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
-import { shouldAutoOpenAgentPanel } from '@/utils/agentPanelAutoOpen'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 
@@ -432,17 +431,7 @@ const currentTodos = computed(() => {
   return Array.isArray(todos) ? todos : []
 })
 
-const hasAgentStateContent = computed(() => {
-  return shouldAutoOpenAgentPanel(currentThreadFiles.value)
-})
 
-// 监听 hasAgentStateContent 从 false → true 时，自动展开面板
-watch(hasAgentStateContent, (newVal, oldVal) => {
-  if (newVal && !oldVal) {
-    // 从无状态变为有状态时，自动展开面板
-    isAgentPanelOpen.value = true
-  }
-})
 const { mentionConfig } = useAgentMentionConfig({
   currentAgentState,
   currentThreadAttachments,
@@ -1014,6 +1003,7 @@ const refreshThreadFilesAndAttachments = async (threadId) => {
 const handleArtifactSaved = async () => {
   if (!currentChatId.value) return
   await refreshThreadFilesAndAttachments(currentChatId.value)
+  isAgentPanelOpen.value = true
 }
 
 const fetchAgentState = async (agentId, threadId) => {
@@ -1084,6 +1074,7 @@ const handleAttachmentUpload = async (files) => {
       fetchAgentState(currentAgentId.value, threadId),
       refreshThreadFilesAndAttachments(threadId)
     ])
+    isAgentPanelOpen.value = true
   } catch (error) {
     message.destroy('upload-attachment')
     handleChatError(error, 'upload')

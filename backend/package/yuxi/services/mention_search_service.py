@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from pathlib import Path
 
 import ormsgpack
 from yuxi.agents.backends.sandbox.paths import (
-    ensure_thread_dirs,
     sandbox_outputs_dir,
     sandbox_uploads_dir,
     sandbox_workspace_dir,
@@ -52,10 +52,10 @@ def _scan_pruned_files(root: Path, max_entries: int) -> list[tuple[str, str]]:
         # 1. 剪枝黑名单和隐藏目录 (直接在 dirnames 中修改，阻止 os.walk 深入)
         dirnames[:] = [d for d in dirnames if d not in MENTION_EXCLUDE_DIRS and not d.startswith(".")]
 
-        # 2. 深度保护：限制最大搜索深度
+        # 2. 深度保护：限制最大搜索深度（root 本身为第 0 层，第 15 层时 rel.parts 长度恰好为 15）
         try:
             rel = Path(dirpath).relative_to(root)
-            if len(rel.parts) > MAX_SEARCH_DEPTH:
+            if len(rel.parts) >= MAX_SEARCH_DEPTH:
                 dirnames.clear()
                 continue
         except Exception:
@@ -97,8 +97,6 @@ async def get_or_build_file_index(
     """
     获取或构建当前 Workspace 和 Thread 的提及文件索引缓存 (使用 ormsgpack 二进制序列化)
     """
-    ensure_thread_dirs(thread_id, user_id)
-
     redis = await get_redis_client()
     redis_key = f"{REDIS_KEY_PREFIX}{thread_id}"
 
@@ -109,7 +107,9 @@ async def get_or_build_file_index(
     cached_str = await redis.get(redis_key)
     if cached_str:
         try:
-            packed_bytes = cached_str.encode("latin1")
+            # NOTE: decode_responses=True 的 Redis 客户端只能存 str，
+            # 使用 base64 对 ormsgpack 的二进制输出进行无损编码后存储。
+            packed_bytes = base64.b64decode(cached_str)
             return ormsgpack.unpackb(packed_bytes)
         except Exception as e:
             logger.warning(f"Failed to unpack mention cache for thread {thread_id}: {e}")
@@ -138,7 +138,7 @@ async def get_or_build_file_index(
     # 写入 Redis 缓存
     try:
         packed_bytes = ormsgpack.packb(entries)
-        packed_str = packed_bytes.decode("latin1")
+        packed_str = base64.b64encode(packed_bytes).decode("ascii")
         await redis.set(redis_key, packed_str, ex=CACHE_TTL)
     except Exception as e:
         logger.warning(f"Failed to write mention cache for thread {thread_id}: {e}")
@@ -156,6 +156,10 @@ async def search_mention_files_in_index(
     """
     index = await get_or_build_file_index(thread_id, user_id)
     if not index:
+        return []
+
+    # NOTE: query 为空时不执行搜索，避免空字符串匹配所有条目（空串是任何字符串的子串）
+    if not query:
         return []
 
     query_lower = query.lower()
