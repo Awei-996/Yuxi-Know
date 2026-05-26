@@ -14,6 +14,7 @@ from yuxi.utils.datetime_utils import utc_now_naive
 DEFAULT_AGENT_SLUG = "default-chatbot"
 DEFAULT_AGENT_NAME = "智能助手"
 DEFAULT_AGENT_BACKEND_ID = "ChatbotAgent"
+DEFAULT_AGENT_DESCRIPTION = "基础的对话机器人，可以回答问题，可在配置中启用需要的工具。"
 DEFAULT_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 ACCESS_LEVELS = {"global", "department", "user"}
 ADMIN_ROLES = {"admin", "superadmin"}
@@ -115,6 +116,9 @@ class AgentRepository:
             if agent.share_config != DEFAULT_SHARE_CONFIG:
                 agent.share_config = DEFAULT_SHARE_CONFIG.copy()
                 needs_update = True
+            if not agent.description:
+                agent.description = DEFAULT_AGENT_DESCRIPTION
+                needs_update = True
             if not agent.is_default:
                 return await self.set_default(agent=agent, updated_by=created_by)
             if needs_update:
@@ -128,7 +132,7 @@ class AgentRepository:
             slug=DEFAULT_AGENT_SLUG,
             backend_id=DEFAULT_AGENT_BACKEND_ID,
             name=DEFAULT_AGENT_NAME,
-            description=None,
+            description=DEFAULT_AGENT_DESCRIPTION,
             icon=None,
             pics=[],
             config_json={"context": {}},
