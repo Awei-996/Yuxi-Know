@@ -154,6 +154,83 @@ async def test_process_agent_run_retryable_error_retries_then_completes(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_chunked_event_writer_flushes_loading_chunks_by_thread(monkeypatch: pytest.MonkeyPatch):
+    events: list[dict] = []
+
+    async def fake_append_run_event(run_id: str, event_type: str, payload: dict, *, thread_id: str | None = None):
+        events.append({"run_id": run_id, "event_type": event_type, "payload": payload, "thread_id": thread_id})
+
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_run_event)
+
+    writer = run_worker.ChunkedEventWriter("run-1", "parent-thread")
+    await writer.append({"status": "loading", "response": "parent", "thread_id": "parent-thread"})
+    await writer.append({"status": "loading", "response": "child", "thread_id": "child-thread"})
+    await writer.flush()
+
+    assert events == [
+        {
+            "run_id": "run-1",
+            "event_type": "messages",
+            "payload": {"items": [{"status": "loading", "response": "parent", "thread_id": "parent-thread"}]},
+            "thread_id": "parent-thread",
+        },
+        {
+            "run_id": "run-1",
+            "event_type": "messages",
+            "payload": {"items": [{"status": "loading", "response": "child", "thread_id": "child-thread"}]},
+            "thread_id": "child-thread",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chunked_event_writer_flushes_semantic_tool_call_immediately(monkeypatch: pytest.MonkeyPatch):
+    events: list[dict] = []
+
+    async def fake_append_run_event(run_id: str, event_type: str, payload: dict, *, thread_id: str | None = None):
+        events.append({"run_id": run_id, "event_type": event_type, "payload": payload, "thread_id": thread_id})
+
+    monkeypatch.setattr(run_worker, "append_run_event", fake_append_run_event)
+
+    writer = run_worker.ChunkedEventWriter("run-1", "parent-thread")
+    chunk = {
+        "status": "loading",
+        "response": "",
+        "thread_id": "parent-thread",
+        "stream_event": {
+            "type": "tool_call",
+            "message_id": "msg-1",
+            "tool_call_id": "call-1",
+            "name": "task",
+            "args": {"description": "do work"},
+            "index": 0,
+            "thread_id": "parent-thread",
+            "namespace": [],
+        },
+    }
+    await writer.append(chunk)
+
+    assert events == [
+        {
+            "run_id": "run-1",
+            "event_type": "messages",
+            "payload": {"items": [chunk]},
+            "thread_id": "parent-thread",
+        }
+    ]
+
+
+def test_chunk_thread_id_reads_nested_metadata():
+    assert (
+        run_worker._chunk_thread_id(
+            {"metadata": {"configurable": {"thread_id": "child-thread"}}},
+            "parent-thread",
+        )
+        == "child-thread"
+    )
+
+
+@pytest.mark.asyncio
 async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.MonkeyPatch):
     calls: list[str] = []
 

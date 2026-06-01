@@ -129,29 +129,6 @@ class BaseContext:
         },
     )
 
-    subagents_model: str = field(
-        default=sys_config.default_model,
-        metadata={
-            "name": "子智能体的默认模型",
-            "description": "为所有子智能体设置默认模型，可在各子智能体配置中单独覆盖。",
-            "kind": "llm",
-        },
-    )
-
-    subagents: list[str] | None = field(
-        default=None,
-        metadata={
-            "name": "子智能体",
-            "options": [],
-            "description": (
-                "可选子智能体列表，默认选择当前用户可用的全部 SubAgent。"
-                "为空表示不启用任何 SubAgent，但依然会启用一个 general-purpose 的子智能体。"
-            ),
-            "type": "list",
-            "kind": "subagents",
-        },
-    )
-
     summary_threshold: int = field(
         default=100,
         metadata={
@@ -212,7 +189,9 @@ class BaseContext:
                 setattr(self, key, value)
 
 
-_DEFAULT_ALL_CONTEXT_FIELDS = frozenset({"tools", "knowledges", "mcps", "skills", "subagents"})
+_DEFAULT_ALL_CONTEXT_FIELDS = frozenset({"tools", "knowledges", "mcps", "skills"})
+_EMPTY_ALL_CONTEXT_FIELDS = frozenset({"subagents"})
+_AGENT_RESOURCE_FIELDS = _DEFAULT_ALL_CONTEXT_FIELDS | _EMPTY_ALL_CONTEXT_FIELDS
 
 
 def _normalize_selected_resource_keys(value: Any, available: list[str]) -> list[str]:
@@ -238,6 +217,12 @@ def _resource_fields_requiring_available_keys(normalized: dict, resource_fields:
     for field_name in resource_fields:
         current = normalized.get(field_name)
         if current is None:
+            if field_name in _DEFAULT_ALL_CONTEXT_FIELDS | _EMPTY_ALL_CONTEXT_FIELDS:
+                fields_to_load.add(field_name)
+            else:
+                normalized[field_name] = []
+        elif field_name in _EMPTY_ALL_CONTEXT_FIELDS and current == []:
+            normalized[field_name] = None
             fields_to_load.add(field_name)
         elif isinstance(current, list) and current:
             fields_to_load.add(field_name)
@@ -261,7 +246,7 @@ async def resolve_agent_resource_options(
     db,
     user,
 ) -> dict[str, list[dict[str, str]]]:
-    fields_to_load = _DEFAULT_ALL_CONTEXT_FIELDS if resource_fields is None else resource_fields
+    fields_to_load = _AGENT_RESOURCE_FIELDS if resource_fields is None else resource_fields
     if not fields_to_load:
         return {}
 
@@ -301,13 +286,11 @@ async def resolve_agent_resource_options(
             _resource_option(skill.slug, skill.name, skill.description) for skill in skills if skill.slug
         ]
     if "subagents" in fields_to_load:
-        from yuxi.agents.subagents.service import get_all_subagents
+        from yuxi.repositories.agent_repository import AgentRepository
 
-        subagents = await get_all_subagents(db)
+        subagents = await AgentRepository(db).list_visible_subagents(user=user)
         options["subagents"] = [
-            _resource_option(item.get("slug"), item.get("name"), item.get("description"))
-            for item in subagents
-            if item.get("enabled") and item.get("slug")
+            _resource_option(agent.slug, agent.name, agent.description) for agent in subagents if agent.slug
         ]
 
     return options
@@ -325,7 +308,7 @@ async def normalize_agent_context_config(
     filtered = filter_config_by_role({"context": raw_context}, getattr(user, "role", None), schema)
     normalized = dict(filtered.get("context") or {})
     field_names = {item.name for item in fields(schema)}
-    resource_fields = _DEFAULT_ALL_CONTEXT_FIELDS & field_names
+    resource_fields = _AGENT_RESOURCE_FIELDS & field_names
     if not resource_fields:
         return normalized
 
@@ -355,6 +338,7 @@ async def prepare_agent_runtime_context(
     context_schema: type[BaseContext] | None = None,
 ) -> BaseContext:
     """准备 Agent 运行时上下文，主要是根据 context 中的 uid 加载用户可访问的资源列表，并进行规范化处理。"""
+    schema = context_schema or type(context)
     uid = str(getattr(context, "uid", "") or "").strip()
     if not uid:
         return context
@@ -364,7 +348,7 @@ async def prepare_agent_runtime_context(
     from yuxi.repositories.user_repository import UserRepository
     from yuxi.storage.postgres.manager import pg_manager
 
-    resource_fields = _DEFAULT_ALL_CONTEXT_FIELDS
+    resource_fields = _AGENT_RESOURCE_FIELDS
     async with pg_manager.get_async_session_context() as db:
         user = await UserRepository().get_by_uid_with_db(db, uid)
         if user is None:
@@ -387,7 +371,7 @@ async def prepare_agent_runtime_context(
             raw_resources,
             db=db,
             user=user,
-            context_schema=context_schema,
+            context_schema=schema,
         )
         for field_name in resource_fields:
             if hasattr(context, field_name):

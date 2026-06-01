@@ -29,6 +29,10 @@
 - [ ] 附件上传能够支持转换为 PDF，待办：查看 OCR 模型的状态，样式优化，保存的文件名不对
 - [ ] 参考 PR，实现内置 Dashscope 的 Embedding 和 rerank 的方法
 - [ ] 优化知识库的 API 接口设计，使用 /{db_id}/xxx 的形式，整合 mindmap / eval 接口
+- [ ] 前端新增基于 ID 的随机像素头像生成机制（类似 GitHub 方块头像），用于替代默认图片
+- [ ] 子智能体右上角功能增强：任务按钮常驻，展开后展示已激活子智能体、附件、state 等信息
+- [ ] 流式输出混排修复：ongoing 流式返回时按 thread ID 区分主/子智能体内容，子智能体内容单独可视化渲染
+- [ ] 子智能体中间过程可查看：流式结束后，通过子智能体自身 thread ID 获取并渲染中间调用过程
 - [x] allow multi-hop qa generate
 - [x] 在工作区的文件编辑的时候，保存和取消的按钮应该是悬浮在编辑框的右上角，而不是在 header 上面
 - [x] default enable all build in tools / kbs / skills / mcps / subagents

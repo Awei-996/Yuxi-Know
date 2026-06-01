@@ -7,7 +7,6 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from yuxi.services.task_service import tasker
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.models.providers.service import ensure_builtin_model_providers_in_db
-from yuxi.agents.subagents.service import init_builtin_subagents
 from yuxi.services.run_queue_service import close_queue_clients, get_redis_client
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.knowledge import knowledge_base
@@ -67,13 +66,6 @@ async def lifespan(app: FastAPI):
             model_cache.rebuild(providers)
     except Exception as e:
         logger.error(f"Failed to initialize model cache during startup: {e}")
-
-    # 初始化内置 SubAgent
-    try:
-        await init_builtin_subagents()
-    except Exception as e:
-        logger.error(f"Failed to initialize builtin subagents during startup: {e}")
-        raise
 
     # 初始化知识库管理器
     if os.environ.get("LITE_MODE", "").lower() in ("true", "1"):

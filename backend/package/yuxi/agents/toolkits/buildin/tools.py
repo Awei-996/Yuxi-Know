@@ -78,7 +78,7 @@ def _normalize_presented_artifact_path(filepath: str, runtime: ToolRuntime) -> s
 
     outputs_virtual_prefix = f"{VIRTUAL_PATH_PREFIX}/outputs"
     runtime_context = runtime.context
-    thread_id = getattr(runtime_context, "thread_id", None)
+    thread_id = getattr(runtime_context, "file_thread_id", None) or getattr(runtime_context, "thread_id", None)
     if not thread_id:
         raise ValueError("当前运行时缺少 thread_id")
     uid = getattr(runtime_context, "uid", None)

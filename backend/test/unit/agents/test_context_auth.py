@@ -33,6 +33,11 @@ filter_config_by_role = context_module.filter_config_by_role
 normalize_agent_context_config = context_module.normalize_agent_context_config
 
 
+@dataclass(kw_only=True)
+class ChatBotContext(BaseContext):
+    subagents: list[str] | None = field(default=None, metadata={"kind": "subagents"})
+
+
 @dataclass
 class SuperAdminOnlyContext(BaseContext):
     secret_setting: str = field(default="hidden", metadata={"name": "Secret", "auth": "superadmin"})
@@ -110,11 +115,16 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
             types.SimpleNamespace(slug="skill-b", name="Skill B", description=""),
         ]
 
-    async def fake_get_all_subagents(_db=None):
-        return [
-            {"slug": "research-agent", "name": "Research", "description": "", "enabled": True},
-            {"slug": "critique-agent", "name": "Critique", "description": "", "enabled": True},
-        ]
+    class FakeAgentRepository:
+        def __init__(self, _db):
+            pass
+
+        async def list_visible_subagents(self, *, user):
+            assert user.uid == "u1"
+            return [
+                types.SimpleNamespace(slug="research-agent", name="Research", description=""),
+                types.SimpleNamespace(slug="critique-agent", name="Critique", description=""),
+            ]
 
     monkeypatch.setitem(
         sys.modules,
@@ -143,8 +153,8 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
     )
     monkeypatch.setitem(
         sys.modules,
-        "yuxi.agents.subagents.service",
-        types.SimpleNamespace(get_all_subagents=fake_get_all_subagents),
+        "yuxi.repositories.agent_repository",
+        types.SimpleNamespace(AgentRepository=FakeAgentRepository),
     )
 
     normalized = await normalize_agent_context_config(
@@ -158,6 +168,7 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
         },
         db=object(),
         user=types.SimpleNamespace(role="user", uid="u1", department_id=None),
+        context_schema=ChatBotContext,
     )
 
     assert normalized["tools"] == ["ask_user_question", "tavily_search"]
@@ -166,6 +177,15 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
     assert normalized["skills"] == []
     assert normalized["subagents"] == ["research-agent"]
     assert "summary_threshold" not in normalized
+
+    empty_subagents_normalized = await normalize_agent_context_config(
+        {"tools": [], "knowledges": [], "mcps": [], "skills": [], "subagents": []},
+        db=object(),
+        user=types.SimpleNamespace(role="user", uid="u1", department_id=None),
+        context_schema=ChatBotContext,
+    )
+
+    assert empty_subagents_normalized["subagents"] == ["research-agent", "critique-agent"]
 
 
 @pytest.mark.asyncio
@@ -181,9 +201,6 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
             types.SimpleNamespace(slug="skill-a", name="Skill A", description=""),
             types.SimpleNamespace(slug="skill-b", name="Skill B", description=""),
         ]
-
-    async def fake_get_all_subagents(_db=None):
-        return [{"slug": "sub-a", "name": "Sub A", "description": "", "enabled": True}]
 
     async def fake_resolve_visible_knowledge_bases(context):
         assert context.knowledges == ["kb-a"]
@@ -213,6 +230,14 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
         async def get_by_uid_with_db(self, _db, uid):
             assert uid == "u1"
             return types.SimpleNamespace(role="user", uid="u1", department_id=None)
+
+    class FakeAgentRepository:
+        def __init__(self, _db):
+            pass
+
+        async def list_visible_subagents(self, *, user):
+            assert user.uid == "u1"
+            return [types.SimpleNamespace(slug="research-agent", name="Research", description="")]
 
     monkeypatch.setitem(
         sys.modules,
@@ -260,11 +285,10 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     )
     monkeypatch.setitem(
         sys.modules,
-        "yuxi.agents.subagents.service",
-        types.SimpleNamespace(get_all_subagents=fake_get_all_subagents),
+        "yuxi.repositories.agent_repository",
+        types.SimpleNamespace(AgentRepository=FakeAgentRepository),
     )
-
-    context = BaseContext(
+    context = ChatBotContext(
         uid="u1",
         tools=["ask_user_question", "missing"],
         knowledges=["kb-a", "missing"],
@@ -279,7 +303,7 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     assert prepared.knowledges == ["kb-a"]
     assert prepared.mcps == ["mcp-a"]
     assert prepared.skills == ["skill-a"]
-    assert prepared.subagents == []
+    assert prepared.subagents == ["research-agent"]
     assert prepared._visible_knowledge_bases == [{"slug": "kb-a", "name": "Docs A"}]
     assert prepared._prompt_skills == ["skill-a", "skill-b"]
     assert prepared._readable_skills == ["skill-a", "skill-b"]
@@ -321,7 +345,7 @@ async def test_prepare_agent_runtime_context_clears_resources_for_missing_user(m
         types.SimpleNamespace(pg_manager=types.SimpleNamespace(get_async_session_context=lambda: FakeSessionContext())),
     )
 
-    context = BaseContext(
+    context = ChatBotContext(
         uid="missing",
         tools=["tool"],
         knowledges=["kb"],

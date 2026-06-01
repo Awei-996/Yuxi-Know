@@ -171,6 +171,7 @@ class Agent(Base):
     share_config = Column(JSON, nullable=False, default=dict)
 
     is_default = Column(Boolean, nullable=False, default=False, index=True)
+    is_subagent = Column(Boolean, nullable=False, default=False, index=True)
 
     created_by = Column(String(64), nullable=True, index=True)
     updated_by = Column(String(64), nullable=True)
@@ -192,6 +193,7 @@ class Agent(Base):
             "config_json": self.config_json or {},
             "share_config": self.share_config or {},
             "is_default": bool(self.is_default),
+            "is_subagent": bool(self.is_subagent),
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "created_at": format_utc_datetime(self.created_at),
@@ -657,58 +659,6 @@ class TaskRecord(Base):
         data.pop("payload", None)
         data.pop("result", None)
         return data
-
-
-class SubAgent(Base):
-    """SubAgent 模型 - 用于动态配置子智能体"""
-
-    __tablename__ = "subagents"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    slug = Column(String(128), nullable=False, unique=True, index=True, comment="稳定标识")
-    name = Column(String(128), nullable=False, comment="展示名称")
-    description = Column(Text, nullable=False, comment="描述")
-    system_prompt = Column(Text, nullable=False, comment="系统提示词")
-    tools = Column(JSON, nullable=False, default=list, comment="工具名称列表")
-    model = Column(String(128), nullable=True, comment="可选的模型覆盖")
-    enabled = Column(Boolean, nullable=False, default=True, comment="是否启用")
-
-    is_builtin = Column(Boolean, nullable=False, default=False, comment="是否内置")
-
-    created_by = Column(String(100), nullable=True)
-    updated_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=utc_now_naive)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "slug": self.slug,
-            "name": self.name,
-            "description": self.description,
-            "system_prompt": self.system_prompt,
-            "tools": self.tools or [],
-            "model": self.model,
-            "enabled": bool(self.enabled),
-            "is_builtin": bool(self.is_builtin),
-            "created_by": self.created_by,
-            "updated_by": self.updated_by,
-            "created_at": format_utc_datetime(self.created_at),
-            "updated_at": format_utc_datetime(self.updated_at),
-        }
-
-    def to_subagent_spec(self) -> dict[str, Any]:
-        """转换为 SubAgentMiddleware 需要的 spec 格式"""
-        spec = {
-            "slug": self.slug,
-            "name": self.slug,
-            "description": self.description,
-            "system_prompt": self.system_prompt,
-            "tools": self.tools or [],
-        }
-        if self.model:
-            spec["model"] = self.model
-        return spec
 
 
 class APIKey(Base):

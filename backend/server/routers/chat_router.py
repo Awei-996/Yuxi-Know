@@ -192,6 +192,7 @@ async def get_thread_history(
 @chat.get("/thread/{thread_id}/state")
 async def get_thread_state(
     thread_id: str,
+    include_messages: bool = Query(False),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -201,6 +202,7 @@ async def get_thread_state(
             thread_id=thread_id,
             current_uid=str(current_user.uid),
             db=db,
+            include_messages=include_messages,
         )
     except HTTPException:
         raise

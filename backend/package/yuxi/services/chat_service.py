@@ -12,6 +12,7 @@ from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agents_prompt_f
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import normalize_agent_context_config
 from yuxi.agents.state import AgentStatePayload
+from yuxi.agents.subagent_thread import parse_child_thread_id
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services.conversation_service import serialize_attachment
@@ -140,15 +141,17 @@ def _build_langfuse_run_context(
 def extract_agent_state(values: dict) -> AgentStatePayload:
     """从 LangGraph state 中提取 agent 状态"""
     if not isinstance(values, dict):
-        return {"todos": [], "files": {}, "artifacts": []}
+        return {"todos": [], "files": {}, "artifacts": [], "subagent_runs": []}
 
     # 直接获取，信任 state 的数据结构
     todos = values.get("todos")
     artifacts = values.get("artifacts")
+    subagent_runs = values.get("subagent_runs")
     result: AgentStatePayload = {
         "todos": list(todos)[:20] if todos else [],
         "files": values.get("files") or {},
         "artifacts": list(artifacts) if artifacts else [],
+        "subagent_runs": list(subagent_runs) if subagent_runs else [],
     }
 
     return result
@@ -161,6 +164,189 @@ def _agent_state_signature(agent_state: AgentStatePayload | dict | None) -> str:
         return json.dumps(agent_state, ensure_ascii=False, sort_keys=True)
     except Exception:
         return str(agent_state)
+
+
+def _metadata_thread_id(metadata: dict | None, fallback: str | None = None) -> str | None:
+    if not isinstance(metadata, dict):
+        return fallback
+
+    for source in (
+        metadata,
+        metadata.get("configurable"),
+        metadata.get("metadata"),
+        metadata.get("stream_event"),
+    ):
+        if isinstance(source, dict):
+            value = source.get("thread_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return fallback
+
+
+def _metadata_namespace(metadata: dict | None) -> list[str]:
+    if not isinstance(metadata, dict):
+        return []
+    namespace = metadata.get("namespace")
+    if isinstance(namespace, list):
+        return [str(item) for item in namespace]
+    return []
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(child) for key, child in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(child) for child in value]
+    if hasattr(value, "model_dump"):
+        return _json_safe(value.model_dump())
+    return str(value)
+
+
+def _stream_message_key(metadata: dict | None, namespace: list[str], thread_id: str | None) -> tuple[str, str]:
+    if not isinstance(metadata, dict):
+        return thread_id or "", "/".join(namespace)
+    return thread_id or "", str(metadata.get("run_id") or metadata.get("langgraph_node") or "/".join(namespace))
+
+
+def _stream_message_id(
+    message_ids: dict[tuple[str, str], str],
+    key: tuple[str, str],
+    preferred: str | None = None,
+) -> str:
+    if preferred:
+        message_ids[key] = preferred
+        return preferred
+    return message_ids.setdefault(key, str(uuid.uuid4()))
+
+
+def _message_chunk_yuxi_events(
+    msg_dict: dict[str, Any],
+    *,
+    message_id: str,
+    thread_id: str | None,
+    namespace: list[str],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    route = {"thread_id": thread_id, "namespace": namespace}
+    content = msg_dict.get("content")
+    additional_kwargs = msg_dict.get("additional_kwargs") if isinstance(msg_dict.get("additional_kwargs"), dict) else {}
+    reasoning_content = msg_dict.get("reasoning_content")
+    additional_reasoning_content = additional_kwargs.get("reasoning_content")
+
+    message_event: dict[str, Any] = {"type": "message_delta", "message_id": message_id, **route}
+    if isinstance(content, str) and content:
+        message_event["content"] = content
+    if isinstance(reasoning_content, str) and reasoning_content:
+        message_event["reasoning_content"] = reasoning_content
+    if isinstance(additional_reasoning_content, str) and additional_reasoning_content:
+        message_event["additional_reasoning_content"] = additional_reasoning_content
+    if len(message_event) > 4:
+        events.append(message_event)
+
+    tool_call_chunks = msg_dict.get("tool_call_chunks")
+    if isinstance(tool_call_chunks, list):
+        for tool_call_chunk in tool_call_chunks:
+            if not isinstance(tool_call_chunk, dict):
+                continue
+            args_delta = tool_call_chunk.get("args")
+            if args_delta is None:
+                args_delta = ""
+            elif not isinstance(args_delta, str):
+                args_delta = json.dumps(args_delta, ensure_ascii=False)
+            if not tool_call_chunk.get("id") and not tool_call_chunk.get("name") and not args_delta:
+                continue
+            events.append(
+                {
+                    "type": "tool_call_delta",
+                    "message_id": message_id,
+                    "tool_call_id": tool_call_chunk.get("id"),
+                    "name": tool_call_chunk.get("name"),
+                    "args_delta": args_delta,
+                    "index": tool_call_chunk.get("index") if tool_call_chunk.get("index") is not None else 0,
+                    **route,
+                }
+            )
+    return events
+
+
+def _protocol_event_yuxi_event(
+    event: dict[str, Any],
+    *,
+    message_id: str | None,
+    thread_id: str | None,
+    namespace: list[str],
+) -> dict[str, Any] | None:
+    event_name = event.get("event")
+    if event_name in {"message-start", "content-block-start", "message-finish"} or not message_id:
+        return None
+
+    route = {"thread_id": thread_id, "namespace": namespace}
+    if event_name == "content-block-delta":
+        delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+        text = delta.get("text")
+        if delta.get("type") == "text-delta" and isinstance(text, str) and text:
+            return {"type": "message_delta", "message_id": message_id, "content": text, **route}
+        return None
+
+    if event_name == "content-block-finish":
+        content = event.get("content") if isinstance(event.get("content"), dict) else {}
+        if content.get("type") != "tool_call" or not content.get("id") and not content.get("name"):
+            return None
+        return {
+            "type": "tool_call",
+            "message_id": message_id,
+            "tool_call_id": content.get("id"),
+            "name": content.get("name"),
+            "args": content.get("args") if content.get("args") is not None else {},
+            "index": event.get("index") if event.get("index") is not None else 0,
+            **route,
+        }
+
+    return None
+
+
+def _stream_event_response(event: dict[str, Any]) -> str:
+    if event.get("type") != "message_delta":
+        return ""
+    return str(event.get("content") or "")
+
+
+def _message_payload_yuxi_events(
+    msg: Any,
+    *,
+    metadata: dict[str, Any],
+    namespace: list[str],
+    thread_id: str | None,
+    protocol_message_ids: dict[tuple[str, str], str],
+) -> list[dict[str, Any]]:
+    message_key = _stream_message_key(metadata, namespace, thread_id)
+    if isinstance(msg, dict) and isinstance(msg.get("event"), str):
+        preferred_message_id = str(msg["id"]) if msg.get("event") == "message-start" and msg.get("id") else None
+        message_id = _stream_message_id(protocol_message_ids, message_key, preferred_message_id)
+        stream_event = _protocol_event_yuxi_event(
+            msg,
+            message_id=message_id,
+            thread_id=thread_id,
+            namespace=namespace,
+        )
+        return [stream_event] if stream_event else []
+
+    if isinstance(msg, AIMessageChunk) or hasattr(msg, "model_dump"):
+        msg_dict = msg.model_dump()
+    elif isinstance(msg, dict):
+        msg_dict = dict(msg)
+    else:
+        msg_dict = {"content": str(msg)}
+
+    message_id = str(msg_dict.get("id") or _stream_message_id(protocol_message_ids, message_key))
+    return _message_chunk_yuxi_events(
+        msg_dict,
+        message_id=message_id,
+        thread_id=thread_id,
+        namespace=namespace,
+    )
 
 
 async def _stream_agent_events(agent, messages, *, input_context=None, **kwargs):
@@ -193,7 +379,19 @@ async def _save_ai_message(
     trace_info: dict[str, Any] | None = None,
 ) -> None:
     content = msg_dict.get("content", "")
-    tool_calls_data = msg_dict.get("tool_calls", [])
+    tool_calls_data = msg_dict.get("tool_calls") or []
+    if isinstance(content, list):
+        if not tool_calls_data:
+            tool_calls_data = [
+                {"id": item.get("id"), "name": item.get("name"), "args": item.get("args") or {}}
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "tool_call"
+            ]
+        content = "\n".join(
+            item.get("text", "") for item in content if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+    elif not isinstance(content, str):
+        content = str(content)
     extra_metadata = dict(msg_dict)
     if trace_info:
         extra_metadata.update(trace_info)
@@ -287,10 +485,25 @@ async def save_messages_from_langgraph_state(
     existing_ids = await _get_existing_message_ids(conv_repo, thread_id)
 
     for msg in messages:
-        msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else {}
-        msg_type = msg_dict.get("type", "unknown")
+        if hasattr(msg, "model_dump"):
+            msg_dict = msg.model_dump()
+        elif isinstance(msg, dict):
+            msg_dict = dict(msg)
+        else:
+            continue
 
-        if msg_type == "human" or getattr(msg, "id", None) in existing_ids:
+        msg_type = msg_dict.get("type", "unknown")
+        if msg_type == "unknown":
+            role = msg_dict.get("role")
+            if role in {"assistant", "ai"}:
+                msg_type = "ai"
+            elif role in {"user", "human"}:
+                msg_type = "human"
+            elif role == "tool":
+                msg_type = "tool"
+
+        msg_id = getattr(msg, "id", None) or msg_dict.get("id")
+        if msg_type == "human" or msg_id in existing_ids:
             continue
 
         if msg_type == "ai":
@@ -712,9 +925,11 @@ async def stream_agent_chat(
     start_time = asyncio.get_event_loop().time()
 
     def make_chunk(content=None, **kwargs):
+        chunk_thread_id = kwargs.pop("thread_id", None) or meta.get("thread_id") or thread_id
         return (
             json.dumps(
-                {"request_id": meta.get("request_id"), "response": content, **kwargs}, ensure_ascii=False
+                {"request_id": meta.get("request_id"), "response": content, "thread_id": chunk_thread_id, **kwargs},
+                ensure_ascii=False,
             ).encode("utf-8")
             + b"\n"
         )
@@ -841,6 +1056,7 @@ async def stream_agent_chat(
 
         full_msg = None
         accumulated_content = []
+        protocol_message_ids: dict[tuple[str, str], str] = {}
         async for mode, payload in _stream_agent_events(
             agent,
             messages,
@@ -857,30 +1073,57 @@ async def stream_agent_chat(
                     yield make_chunk(status="agent_state", agent_state=agent_state, meta=meta)
                 continue
 
+            if mode == "stream_event":
+                yield make_chunk(
+                    status="stream_event",
+                    event=payload,
+                    namespace=payload.get("namespace") if isinstance(payload, dict) else [],
+                    meta=meta,
+                    thread_id=payload.get("thread_id") if isinstance(payload, dict) else None,
+                )
+                continue
+
             msg, metadata = payload
-            if isinstance(msg, AIMessageChunk):
-                accumulated_content.append(msg.content)
-                trace_info = get_trace_info(langfuse_run)
+            namespace = _metadata_namespace(metadata)
+            chunk_thread_id = _metadata_thread_id(metadata, thread_id if not namespace else None)
+            if namespace and not chunk_thread_id:
+                continue
 
-                content_for_check = "".join(accumulated_content[-10:])
-                if conf.enable_content_guard and await content_guard.check_with_keywords(content_for_check):
-                    full_msg = AIMessage(content="".join(accumulated_content))
-                    await save_partial_message(
-                        conv_repo,
-                        thread_id,
-                        full_msg,
-                        "content_guard_blocked",
-                        trace_info=trace_info,
-                    )
-                    meta["time_cost"] = asyncio.get_event_loop().time() - start_time
-                    yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
-                    return
+            is_subagent_chunk = bool(chunk_thread_id and chunk_thread_id != thread_id)
+            stream_events = _message_payload_yuxi_events(
+                msg,
+                metadata=metadata,
+                namespace=namespace,
+                thread_id=chunk_thread_id,
+                protocol_message_ids=protocol_message_ids,
+            )
 
-                yield make_chunk(content=msg.content, msg=msg.model_dump(), metadata=metadata, status="loading")
-            else:
-                msg_dict = msg.model_dump()
-                trace_info = get_trace_info(langfuse_run)
-                yield make_chunk(msg=msg_dict, metadata=metadata, status="loading")
+            for stream_event in stream_events:
+                content = _stream_event_response(stream_event)
+                if not is_subagent_chunk and content:
+                    trace_info = get_trace_info(langfuse_run)
+                    accumulated_content.append(content)
+                    content_for_check = "".join(accumulated_content[-10:])
+                    if conf.enable_content_guard and await content_guard.check_with_keywords(content_for_check):
+                        full_msg = AIMessage(content="".join(accumulated_content))
+                        await save_partial_message(
+                            conv_repo,
+                            thread_id,
+                            full_msg,
+                            "content_guard_blocked",
+                            trace_info=trace_info,
+                        )
+                        meta["time_cost"] = asyncio.get_event_loop().time() - start_time
+                        yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
+                        return
+
+                yield make_chunk(
+                    content=content,
+                    stream_event=stream_event,
+                    metadata=metadata,
+                    status="loading",
+                    thread_id=chunk_thread_id,
+                )
 
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
         trace_info = get_trace_info(langfuse_run)
@@ -991,9 +1234,11 @@ async def stream_agent_resume(
     start_time = asyncio.get_event_loop().time()
 
     def make_resume_chunk(content=None, **kwargs):
+        chunk_thread_id = kwargs.pop("thread_id", None) or meta.get("thread_id") or thread_id
         return (
             json.dumps(
-                {"request_id": meta.get("request_id"), "response": content, **kwargs}, ensure_ascii=False
+                {"request_id": meta.get("request_id"), "response": content, "thread_id": chunk_thread_id, **kwargs},
+                ensure_ascii=False,
             ).encode("utf-8")
             + b"\n"
         )
@@ -1018,7 +1263,6 @@ async def stream_agent_resume(
     meta["backend_id"] = agent_item.backend_id
     context = agent.context_schema()
     context.update(await _build_agent_input_context(agent_config or {}, thread_id=thread_id, uid=uid))
-    graph = await agent.get_graph(context=context)
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -1031,17 +1275,15 @@ async def stream_agent_resume(
     trace_info: dict[str, Any] = {}
     last_agent_state_signature = ""
 
-    stream_source = graph.astream(
+    stream_source = agent.stream_resume_with_state(
         resume_command,
-        context=context,
-        config={
-            "configurable": {"thread_id": thread_id, "uid": uid},
-            "callbacks": langfuse_run.callbacks,
-            "metadata": langfuse_run.metadata,
-            "tags": langfuse_run.tags,
-        },
-        stream_mode=["messages", "values"],
+        input_context=agent_config or {},
+        callbacks=langfuse_run.callbacks,
+        metadata=langfuse_run.metadata,
+        tags=langfuse_run.tags,
     )
+
+    protocol_message_ids: dict[tuple[str, str], str] = {}
 
     try:
         async for mode, payload in stream_source:
@@ -1053,15 +1295,47 @@ async def stream_agent_resume(
                     yield make_resume_chunk(status="agent_state", agent_state=agent_state, meta=meta)
                 continue
 
-            msg, metadata = payload
-            trace_info = get_trace_info(langfuse_run)
-            msg_dict = msg.model_dump()
-            if "id" not in msg_dict:
-                msg_dict["id"] = str(uuid.uuid4())
+            if mode == "stream_event":
+                event_payload = payload if isinstance(payload, dict) else {}
+                yield make_resume_chunk(
+                    status="stream_event",
+                    event=event_payload,
+                    namespace=event_payload.get("namespace") or [],
+                    meta=meta,
+                    thread_id=event_payload.get("thread_id"),
+                )
+                continue
 
-            yield make_resume_chunk(
-                content=getattr(msg, "content", ""), msg=msg_dict, metadata=metadata, status="loading"
+            if mode != "messages":
+                continue
+
+            msg, metadata = payload
+            metadata = dict(metadata or {})
+            namespace = _metadata_namespace(metadata)
+            chunk_thread_id = _metadata_thread_id(metadata, thread_id if not namespace else None)
+            if namespace and not chunk_thread_id:
+                continue
+
+            if chunk_thread_id == thread_id:
+                trace_info = get_trace_info(langfuse_run)
+
+            stream_events = _message_payload_yuxi_events(
+                msg,
+                metadata=metadata,
+                namespace=namespace,
+                thread_id=chunk_thread_id,
+                protocol_message_ids=protocol_message_ids,
             )
+
+            for stream_event in stream_events:
+                content = _stream_event_response(stream_event)
+                yield make_resume_chunk(
+                    content=content,
+                    stream_event=stream_event,
+                    metadata=metadata,
+                    status="loading",
+                    thread_id=chunk_thread_id,
+                )
 
         langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
         async for chunk in check_and_handle_interrupts(agent, langgraph_config, make_resume_chunk, meta, thread_id):
@@ -1070,6 +1344,7 @@ async def stream_agent_resume(
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
 
         try:
+            graph = await agent.get_graph(context=context)
             state = await graph.aget_state(langgraph_config)
             agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
         except Exception:
@@ -1128,28 +1403,104 @@ async def stream_agent_resume(
         flush_langfuse()
 
 
+def _serialize_state_messages(values: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = values.get("messages") if isinstance(values, dict) else None
+    if not isinstance(messages, list):
+        return []
+    serialized = []
+    for message in messages:
+        if hasattr(message, "model_dump"):
+            serialized.append(message.model_dump())
+        elif isinstance(message, dict):
+            serialized.append(dict(message))
+        else:
+            serialized.append({"type": "unknown", "content": str(message)})
+    return serialized
+
+
+async def _read_checkpoint_state(agent, *, uid: str, thread_id: str):
+    graph = await agent.get_graph()
+    langgraph_config = {"configurable": {"uid": uid, "thread_id": thread_id}}
+    return await graph.aget_state(langgraph_config)
+
+
 async def get_agent_state_view(
     *,
     thread_id: str,
     current_uid: str,
     db,
+    include_messages: bool = False,
 ) -> dict:
     from fastapi import HTTPException
 
     conv_repo = ConversationRepository(db)
+    agent_repo = AgentRepository(db)
     conversation = await conv_repo.get_conversation_by_thread_id(thread_id)
-    if not conversation or conversation.uid != str(current_uid) or conversation.status == "deleted":
+    if conversation:
+        if conversation.uid != str(current_uid) or conversation.status == "deleted":
+            raise HTTPException(status_code=404, detail="对话线程不存在")
+
+        agent_item = await agent_repo.get_by_slug(conversation.agent_id)
+        if not agent_item:
+            raise HTTPException(status_code=404, detail="智能体不存在")
+        agent = agent_manager.get_agent(agent_item.backend_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="智能体后端不存在")
+        state = await _read_checkpoint_state(agent, uid=str(current_uid), thread_id=thread_id)
+        values = getattr(state, "values", {}) if state else {}
+        response = {"agent_state": extract_agent_state(values)}
+        if include_messages:
+            response["messages"] = _serialize_state_messages(values)
+        return response
+
+    child_thread = parse_child_thread_id(thread_id)
+    if not child_thread:
         raise HTTPException(status_code=404, detail="对话线程不存在")
 
-    agent_item = await AgentRepository(db).get_by_slug(conversation.agent_id)
-    if not agent_item:
-        raise HTTPException(status_code=404, detail="智能体不存在")
-    agent = agent_manager.get_agent(agent_item.backend_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="智能体后端不存在")
-    graph = await agent.get_graph()
-    langgraph_config = {"configurable": {"uid": str(current_uid), "thread_id": thread_id}}
-    state = await graph.aget_state(langgraph_config)
-    agent_state = extract_agent_state(getattr(state, "values", {})) if state else {}
+    parent_thread_id = child_thread.parent_thread_id
+    parent_conversation = await conv_repo.get_conversation_by_thread_id(parent_thread_id)
+    if (
+        not parent_conversation
+        or parent_conversation.uid != str(current_uid)
+        or parent_conversation.status == "deleted"
+    ):
+        raise HTTPException(status_code=404, detail="对话线程不存在")
 
-    return {"agent_state": agent_state}
+    parent_agent_item = await agent_repo.get_by_slug(parent_conversation.agent_id)
+    if not parent_agent_item:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    parent_agent = agent_manager.get_agent(parent_agent_item.backend_id)
+    if not parent_agent:
+        raise HTTPException(status_code=404, detail="智能体后端不存在")
+
+    parent_state = await _read_checkpoint_state(parent_agent, uid=str(current_uid), thread_id=parent_thread_id)
+    parent_values = getattr(parent_state, "values", {}) if parent_state else {}
+    parent_agent_state = extract_agent_state(parent_values)
+    subagent_run = next(
+        (
+            run
+            for run in parent_agent_state.get("subagent_runs", [])
+            if isinstance(run, dict) and run.get("child_thread_id") == thread_id
+        ),
+        None,
+    )
+    if not subagent_run:
+        raise HTTPException(status_code=404, detail="对话线程不存在")
+
+    child_agent_item = await agent_repo.get_by_slug(str(subagent_run.get("subagent_type") or ""))
+    if not child_agent_item:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    child_agent = agent_manager.get_agent(child_agent_item.backend_id)
+    if not child_agent:
+        raise HTTPException(status_code=404, detail="智能体后端不存在")
+
+    child_state = await _read_checkpoint_state(child_agent, uid=str(current_uid), thread_id=thread_id)
+    child_values = getattr(child_state, "values", {}) if child_state else {}
+    response = {
+        "agent_state": extract_agent_state(child_values),
+        "parent_thread_id": parent_thread_id,
+        "subagent_run": subagent_run,
+    }
+    if include_messages:
+        response["messages"] = _serialize_state_messages(child_values)
+    return response

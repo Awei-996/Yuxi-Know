@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +37,7 @@ class AgentCreate(BaseModel):
     pics: list[str] | None = None
     config_json: dict | None = None
     share_config: dict | None = None
+    is_subagent: bool | None = None
     set_default: bool = False
 
 
@@ -47,6 +48,7 @@ class AgentUpdate(BaseModel):
     pics: list[str] | None = None
     config_json: dict | None = None
     share_config: dict | None = None
+    is_subagent: bool | None = None
 
 
 class AgentRunCreate(BaseModel):
@@ -110,10 +112,14 @@ async def get_agent_backend(
 
 
 @agent_router.get("")
-async def list_agents(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def list_agents(
+    include_subagents: bool = Query(False),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
     repo = AgentRepository(db)
     await repo.ensure_default_agent()
-    items = await repo.list_visible(user=current_user)
+    items = await repo.list_visible(user=current_user, include_subagents=include_subagents)
     backend_info_cache: dict[tuple[str, bool, str], dict] = {}
     agents = [await _serialize_agent(repo, item, current_user, backend_info_cache=backend_info_cache) for item in items]
     return {"agents": agents}
@@ -149,6 +155,7 @@ async def create_agent(
             config_json=_filter_agent_config_json(payload.backend_id, payload.config_json, current_user.role),
             share_config=payload.share_config,
             is_default=payload.set_default,
+            is_subagent=payload.is_subagent,
             created_by=str(current_user.uid),
             creator=current_user,
         )
@@ -160,7 +167,7 @@ async def create_agent(
 @agent_router.get("/{agent_id}")
 async def get_agent(agent_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
     repo = AgentRepository(db)
-    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user)
+    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user, include_subagents=True)
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
     return {"agent": await _serialize_agent(repo, item, current_user, include_configurable_items=True)}
@@ -174,7 +181,7 @@ async def update_agent(
     db: AsyncSession = Depends(get_db),
 ):
     repo = AgentRepository(db)
-    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user)
+    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user, include_subagents=True)
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
     if not user_can_manage_agent(current_user, item):
@@ -197,6 +204,7 @@ async def update_agent(
             if payload.config_json is not None
             else None,
             share_config=payload.share_config,
+            is_subagent=payload.is_subagent,
             updated_by=str(current_user.uid),
             updater=current_user,
         )
@@ -210,7 +218,7 @@ async def delete_agent(
     agent_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
 ):
     repo = AgentRepository(db)
-    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user)
+    item = await repo.get_visible_by_slug(slug=agent_id, user=current_user, include_subagents=True)
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
     if not user_can_manage_agent(current_user, item):

@@ -7,13 +7,13 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.agents.buildin import agent_manager
 from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 DEFAULT_AGENT_SLUG = "default-chatbot"
 DEFAULT_AGENT_NAME = "智能助手"
 DEFAULT_AGENT_BACKEND_ID = "ChatbotAgent"
+SUB_AGENT_BACKEND_ID = "SubAgentBackend"
 DEFAULT_AGENT_DESCRIPTION = "基础的对话机器人，可以回答问题，可在配置中启用需要的工具。"
 DEFAULT_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 ACCESS_LEVELS = {"global", "department", "user"}
@@ -22,6 +22,13 @@ ADMIN_ROLES = {"admin", "superadmin"}
 
 def is_builtin_agent(agent: Agent) -> bool:
     return agent.slug == DEFAULT_AGENT_SLUG
+
+
+def resolve_agent_is_subagent(backend_id: str, is_subagent: bool | None = None) -> bool:
+    expected = backend_id == SUB_AGENT_BACKEND_ID
+    if is_subagent is not None and bool(is_subagent) != expected:
+        raise ValueError("SubAgentBackend 与 is_subagent 必须保持一致")
+    return expected
 
 
 def _normalize_department_ids(department_ids: list | None) -> list[int]:
@@ -119,6 +126,9 @@ class AgentRepository:
             if not agent.description:
                 agent.description = DEFAULT_AGENT_DESCRIPTION
                 needs_update = True
+            if getattr(agent, "is_subagent", False):
+                agent.is_subagent = False
+                needs_update = True
             if not agent.is_default:
                 return await self.set_default(agent=agent, updated_by=created_by)
             if needs_update:
@@ -138,6 +148,7 @@ class AgentRepository:
             config_json={"context": {}},
             share_config=DEFAULT_SHARE_CONFIG.copy(),
             is_default=True,
+            is_subagent=False,
             created_by=created_by,
             updated_by=created_by,
             created_at=utc_now_naive(),
@@ -148,8 +159,20 @@ class AgentRepository:
         await self.db.refresh(agent)
         return agent
 
-    async def list_visible(self, *, user: User) -> list[Agent]:
-        result = await self.db.execute(select(Agent).order_by(Agent.is_default.desc(), Agent.id.asc()))
+    async def list_visible(self, *, user: User, include_subagents: bool = False) -> list[Agent]:
+        stmt = select(Agent)
+        if not include_subagents:
+            stmt = stmt.where(Agent.is_subagent.is_(False))
+        result = await self.db.execute(stmt.order_by(Agent.is_default.desc(), Agent.id.asc()))
+        agents = list(result.scalars().all())
+        if user.role == "superadmin":
+            return agents
+        return [agent for agent in agents if user_can_access_agent(user, agent)]
+
+    async def list_visible_subagents(self, *, user: User) -> list[Agent]:
+        result = await self.db.execute(
+            select(Agent).where(Agent.is_subagent.is_(True)).order_by(Agent.name.asc(), Agent.id.asc())
+        )
         agents = list(result.scalars().all())
         if user.role == "superadmin":
             return agents
@@ -159,9 +182,17 @@ class AgentRepository:
         result = await self.db.execute(select(Agent).where(Agent.slug == slug))
         return result.scalar_one_or_none()
 
-    async def get_visible_by_slug(self, *, slug: str, user: User) -> Agent | None:
+    async def get_visible_by_slug(self, *, slug: str, user: User, include_subagents: bool = False) -> Agent | None:
         agent = await self.get_by_slug(slug)
-        if agent and user_can_access_agent(user, agent):
+        if not agent or (agent.is_subagent and not include_subagents):
+            return None
+        if user_can_access_agent(user, agent):
+            return agent
+        return None
+
+    async def get_visible_subagent_by_slug(self, *, slug: str, user: User) -> Agent | None:
+        agent = await self.get_visible_by_slug(slug=slug, user=user, include_subagents=True)
+        if agent and agent.is_subagent:
             return agent
         return None
 
@@ -170,6 +201,8 @@ class AgentRepository:
         return result.scalar_one_or_none()
 
     async def set_default(self, *, agent: Agent, updated_by: str | None = None) -> Agent:
+        if agent.is_subagent:
+            raise ValueError("子智能体不能设为默认智能体")
         if not is_builtin_agent(agent):
             raise ValueError("默认智能体已固定为内置智能助手")
         share_config = agent.share_config or DEFAULT_SHARE_CONFIG.copy()
@@ -211,9 +244,13 @@ class AgentRepository:
         config_json: dict | None = None,
         share_config: dict | None = None,
         is_default: bool = False,
+        is_subagent: bool | None = None,
         created_by: str | None = None,
         creator: User | None = None,
     ) -> Agent:
+        resolved_is_subagent = resolve_agent_is_subagent(backend_id, is_subagent)
+        if resolved_is_subagent and is_default:
+            raise ValueError("子智能体不能设为默认智能体")
         normalized_share_config = normalize_agent_share_config(
             share_config,
             user_uid=str(creator.uid) if creator else created_by,
@@ -233,6 +270,7 @@ class AgentRepository:
             config_json=config_json or {"context": {}},
             share_config=normalized_share_config,
             is_default=False,
+            is_subagent=resolved_is_subagent,
             created_by=created_by,
             updated_by=created_by,
             created_at=utc_now_naive(),
@@ -255,9 +293,12 @@ class AgentRepository:
         pics: list[str] | None = None,
         config_json: dict | None = None,
         share_config: dict | None = None,
+        is_subagent: bool | None = None,
         updated_by: str | None = None,
         updater: User | None = None,
     ) -> Agent:
+        if is_subagent is not None:
+            agent.is_subagent = resolve_agent_is_subagent(agent.backend_id, is_subagent)
         if name is not None:
             agent.name = name.strip() or "未命名智能体"
         if description is not None:
@@ -302,6 +343,8 @@ class AgentRepository:
         data["can_manage"] = user_can_manage_agent(user, agent)
         data["is_builtin"] = is_builtin_agent(agent)
         data["permission_locked"] = is_builtin_agent(agent)
+
+        from yuxi.agents.buildin import agent_manager
 
         backend = agent_manager.get_agent(agent.backend_id)
         if backend:

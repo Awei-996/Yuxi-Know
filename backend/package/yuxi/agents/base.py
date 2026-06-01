@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from abc import abstractmethod
+from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver, aiosqlite
@@ -10,8 +13,59 @@ from langgraph.graph.state import CompiledStateGraph
 
 from yuxi import config as sys_config
 from yuxi.agents.context import BaseContext, resolve_agent_resource_options
+from yuxi.agents.subagent_thread import make_child_thread_id
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils import logger
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(child) for key, child in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(child) for child in value]
+    if hasattr(value, "model_dump"):
+        return _json_safe(value.model_dump())
+    return str(value)
+
+
+def _subagent_route_for_namespace(
+    routes: dict[tuple[str, ...], dict[str, str]], namespace: list[str]
+) -> dict[str, str] | None:
+    ns = tuple(namespace)
+    for path, route in sorted(routes.items(), key=lambda item: len(item[0]), reverse=True):
+        if ns[: len(path)] == path:
+            return route
+    return None
+
+
+async def _collect_subagent_routes(
+    run, parent_thread_id: str, routes: dict[tuple[str, ...], dict[str, str]]
+) -> None:
+    subagents = getattr(run, "subagents", None)
+    if subagents is None:
+        return
+
+    try:
+        async for subagent in subagents:
+            path = tuple(getattr(subagent, "path", ()) or ())
+            subagent_type = getattr(subagent, "name", None) or getattr(subagent, "graph_name", None)
+            cause = getattr(subagent, "cause", None)
+            tool_call_id = (
+                cause.get("tool_call_id") if isinstance(cause, dict) else getattr(subagent, "trigger_call_id", None)
+            )
+            if path and isinstance(subagent_type, str) and isinstance(tool_call_id, str) and tool_call_id:
+                routes[path] = {
+                    "thread_id": make_child_thread_id(parent_thread_id, subagent_type, tool_call_id),
+                    "parent_thread_id": parent_thread_id,
+                    "subagent_type": subagent_type,
+                    "tool_call_id": tool_call_id,
+                }
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.debug(f"collect subagent stream routes failed: {exc}")
 
 
 class BaseAgent:
@@ -112,11 +166,11 @@ class BaseAgent:
         ):
             yield msg, metadata
 
-    async def stream_messages_with_state(self, messages: list[str], input_context=None, **kwargs):
+    async def _stream_input_with_state(self, graph_input, input_context=None, **kwargs):
         context = self.context_schema()
         context.update_from_dict(input_context or {})
         graph = await self.get_graph(context=context)
-        logger.debug(f"stream_messages_with_state: {context=}")
+        logger.debug(f"stream_with_state: {context=}")
 
         input_config = {
             "configurable": {"thread_id": context.thread_id, "uid": context.uid},
@@ -130,13 +184,56 @@ class BaseAgent:
         if tags := kwargs.get("tags"):
             input_config["tags"] = list(tags)
 
-        async for mode, payload in graph.astream(
-            {"messages": messages},
-            stream_mode=["messages", "values"],
+        run = await graph.astream_events(
+            graph_input,
             context=context,
             config=input_config,
-        ):
-            yield mode, payload
+            version="v3",
+        )
+        subagent_routes: dict[tuple[str, ...], dict[str, str]] = {}
+        route_task = asyncio.create_task(_collect_subagent_routes(run, context.thread_id, subagent_routes))
+        try:
+            async for event in run:
+                params = event.get("params") or {}
+                namespace = list(params.get("namespace") or [])
+                method = event.get("method")
+                data = params.get("data")
+                subagent_route = _subagent_route_for_namespace(subagent_routes, namespace)
+                if namespace and subagent_route is None:
+                    await asyncio.sleep(0)
+                    subagent_route = _subagent_route_for_namespace(subagent_routes, namespace)
+
+                if method == "messages":
+                    msg, metadata = data
+                    metadata = dict(metadata or {})
+                    metadata["namespace"] = namespace
+                    metadata["stream_event"] = {"method": method, "namespace": namespace}
+                    if subagent_route:
+                        metadata.update(subagent_route)
+                    yield "messages", (msg, metadata)
+                elif method == "values" and not namespace:
+                    yield "values", data
+                elif method in {"tasks", "tools", "lifecycle"}:
+                    event_payload = {
+                        "method": method,
+                        "namespace": namespace,
+                        "data": _json_safe(data),
+                    }
+                    if subagent_route:
+                        event_payload.update(subagent_route)
+                    yield "stream_event", event_payload
+        finally:
+            route_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await route_task
+
+    async def stream_messages_with_state(self, messages: list[str], input_context=None, **kwargs):
+        async for event in self._stream_input_with_state({"messages": messages}, input_context, **kwargs):
+            yield event
+
+    async def stream_resume_with_state(self, resume_input, input_context=None, **kwargs):
+        async for event in self._stream_input_with_state(resume_input, input_context, **kwargs):
+            yield event
 
     async def invoke_messages(self, messages: list[str], input_context=None, **kwargs):
         context = self.context_schema()

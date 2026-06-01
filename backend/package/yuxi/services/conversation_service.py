@@ -909,7 +909,7 @@ async def get_thread_history_view(
         if msg.tool_calls:
             msg_dict["tool_calls"] = [
                 {
-                    "id": str(tc.id),
+                    "id": tc.langgraph_tool_call_id or str(tc.id),
                     "name": tc.tool_name,
                     "function": {"name": tc.tool_name},
                     "args": tc.tool_input or {},

@@ -171,6 +171,139 @@ async def test_stream_agent_chat_passes_langfuse_callbacks_and_persists_trace_in
 
 
 @pytest.mark.asyncio
+async def test_stream_agent_chat_maps_raw_protocol_events_to_yuxi_stream_events(monkeypatch: pytest.MonkeyPatch):
+    class FakeGraph:
+        async def aget_state(self, _config):
+            return SimpleNamespace(values={"messages": [], "files": {}, "artifacts": []})
+
+    class FakeAgent:
+        context_schema = None
+
+        async def stream_messages_with_state(self, messages, input_context=None, **kwargs):
+            del messages, input_context, kwargs
+            metadata = {"run_id": "run-1"}
+            yield "messages", ({"event": "message-start", "id": "msg-1", "role": "ai"}, metadata)
+            yield "messages", ({"event": "content-block-start", "index": 0, "content": {"type": "text"}}, metadata)
+            yield (
+                "messages",
+                (
+                    {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": "hello"}},
+                    metadata,
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    {
+                        "event": "content-block-delta",
+                        "index": 1,
+                        "delta": {
+                            "type": "block-delta",
+                            "fields": {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "task",
+                                "args": '{"description":"do',
+                                "index": 0,
+                            },
+                        },
+                    },
+                    metadata,
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    {
+                        "event": "content-block-finish",
+                        "index": 1,
+                        "content": {
+                            "type": "tool_call",
+                            "id": "call-1",
+                            "name": "task",
+                            "args": {"description": "do work", "subagent_type": "worker"},
+                        },
+                    },
+                    metadata,
+                ),
+            )
+            yield "messages", ({"event": "message-finish", "usage": {}}, metadata)
+
+        async def stream_messages(self, messages, input_context=None, **kwargs):
+            raise AssertionError("stream_messages fallback should not be used")
+
+        async def get_graph(self):
+            return FakeGraph()
+
+    async def fake_resolve_agent_runtime(**_kwargs):
+        return SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"), FakeAgent(), {}
+
+    async def fake_save_messages_from_langgraph_state(*, agent_instance, thread_id, conv_repo, config_dict, trace_info):
+        return None
+
+    async def fake_guard_check(_content):
+        return False
+
+    async def fake_guard_check_with_keywords(_content):
+        return False
+
+    async def fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id):
+        if False:
+            yield None
+        return
+
+    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
+    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
+    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
+    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
+    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
+    monkeypatch.setattr(svc.content_guard, "check_with_keywords", fake_guard_check_with_keywords)
+    monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_interrupts)
+    monkeypatch.setattr(
+        svc,
+        "_build_langfuse_run_context",
+        lambda **kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None),
+    )
+    monkeypatch.setattr(svc, "get_trace_info", lambda _run_context: {})
+    monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
+
+    chunks = []
+    async for chunk in svc.stream_agent_chat(
+        query="hello",
+        agent_id="test-agent",
+        thread_id="thread-1",
+        meta={"request_id": "req-1"},
+        image_content=None,
+        current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
+        db=object(),
+    ):
+        chunks.append(json.loads(chunk.decode("utf-8")))
+
+    loading_chunks = [chunk for chunk in chunks if chunk.get("status") == "loading"]
+    assert [chunk["stream_event"]["type"] for chunk in loading_chunks] == ["message_delta", "tool_call"]
+    assert loading_chunks[0]["response"] == "hello"
+    assert loading_chunks[0]["stream_event"] == {
+        "type": "message_delta",
+        "message_id": "msg-1",
+        "thread_id": "thread-1",
+        "namespace": [],
+        "content": "hello",
+    }
+    assert loading_chunks[1]["response"] == ""
+    assert loading_chunks[1]["stream_event"] == {
+        "type": "tool_call",
+        "message_id": "msg-1",
+        "tool_call_id": "call-1",
+        "name": "task",
+        "args": {"description": "do work", "subagent_type": "worker"},
+        "index": 1,
+        "thread_id": "thread-1",
+        "namespace": [],
+    }
+    assert all("msg" not in chunk for chunk in loading_chunks)
+
+
+@pytest.mark.asyncio
 async def test_stream_agent_chat_emits_realtime_agent_state_from_values(monkeypatch: pytest.MonkeyPatch):
     class FakeGraph:
         async def aget_state(self, _config):

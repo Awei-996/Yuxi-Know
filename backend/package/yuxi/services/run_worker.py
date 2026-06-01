@@ -76,32 +76,53 @@ class RunContext:
                 return
 
 
+_ALL_THREADS = object()
+
+
+@dataclass
+class _ThreadBuffer:
+    items: list[dict] = field(default_factory=list)
+    chars: int = 0
+    last_flush: float = field(default_factory=time.monotonic)
+
+
 class ChunkedEventWriter:
     def __init__(self, run_id: str, thread_id: str | None, interval_ms: int = 100, max_chars: int = 512):
         self.run_id = run_id
         self.thread_id = thread_id
         self.interval_seconds = interval_ms / 1000
         self.max_chars = max_chars
-        self.buffer: list[dict] = []
-        self.buffer_chars = 0
-        self.last_flush = time.monotonic()
+        self.thread_buffers: dict[str | None, _ThreadBuffer] = {}
 
-    async def append(self, chunk: dict):
-        self.buffer.append(chunk)
-        content = chunk.get("response") or ""
-        self.buffer_chars += len(content) if isinstance(content, str) else 0
+    def _target_thread_id(self, thread_id: str | None = None) -> str | None:
+        return thread_id or self.thread_id
 
-        now = time.monotonic()
-        if (now - self.last_flush) >= self.interval_seconds or self.buffer_chars >= self.max_chars:
-            await self.flush()
+    async def append(self, chunk: dict, *, thread_id: str | None = None):
+        target_thread_id = self._target_thread_id(thread_id or _thread_id_from_mapping(chunk))
+        buffer = self.thread_buffers.setdefault(target_thread_id, _ThreadBuffer())
+        buffer.items.append(chunk)
+        buffer.chars += _loading_chunk_size(chunk)
 
-    async def flush(self):
-        if not self.buffer:
+        if _flush_loading_chunk_immediately(chunk):
+            await self.flush(target_thread_id)
             return
-        await append_run_event(self.run_id, "messages", {"items": self.buffer}, thread_id=self.thread_id)
-        self.buffer = []
-        self.buffer_chars = 0
-        self.last_flush = time.monotonic()
+
+        if (time.monotonic() - buffer.last_flush) >= self.interval_seconds or buffer.chars >= self.max_chars:
+            await self.flush(target_thread_id)
+
+    async def flush(self, thread_id: str | None | object = _ALL_THREADS):
+        if thread_id is _ALL_THREADS:
+            for target_thread_id in list(self.thread_buffers):
+                await self.flush(target_thread_id)
+            return
+
+        buffer = self.thread_buffers.get(thread_id)
+        if not buffer or not buffer.items:
+            return
+        await append_run_event(self.run_id, "messages", {"items": buffer.items}, thread_id=thread_id)
+        buffer.items = []
+        buffer.chars = 0
+        buffer.last_flush = time.monotonic()
 
 
 async def _get_run(run_id: str):
@@ -168,6 +189,44 @@ def _iter_json_chunks(chunk_bytes: bytes) -> list[dict]:
         except Exception:
             logger.warning(f"Failed to parse run stream chunk: {line[:200]}")
     return chunks
+
+
+def _thread_id_from_mapping(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    thread_id = value.get("thread_id")
+    if isinstance(thread_id, str) and thread_id.strip():
+        return thread_id.strip()
+    for key in ("meta", "metadata", "configurable", "stream_event"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            nested_thread_id = _thread_id_from_mapping(nested)
+            if nested_thread_id:
+                return nested_thread_id
+    return None
+
+
+def _loading_chunk_size(chunk: dict) -> int:
+    response = chunk.get("response")
+    total = len(response) if isinstance(response, str) else 0
+    stream_event = chunk.get("stream_event")
+    if not isinstance(stream_event, dict):
+        return total
+
+    for key in ("content", "reasoning_content", "additional_reasoning_content", "args_delta"):
+        value = stream_event.get(key)
+        if isinstance(value, str):
+            total += len(value)
+    return total
+
+
+def _flush_loading_chunk_immediately(chunk: dict) -> bool:
+    stream_event = chunk.get("stream_event")
+    return isinstance(stream_event, dict) and stream_event.get("type") == "tool_call"
+
+
+def _chunk_thread_id(chunk: dict, fallback: str | None) -> str | None:
+    return _thread_id_from_mapping(chunk) or fallback
 
 
 def _map_chunk_to_run_event(chunk: dict) -> tuple[str, dict]:
@@ -300,15 +359,21 @@ async def process_agent_run(ctx, run_id: str):
 
             async for chunk_bytes in _consume_stream_with_cancel(stream, run_ctx):
                 for chunk in _iter_json_chunks(chunk_bytes):
+                    target_thread_id = _chunk_thread_id(chunk, thread_id)
                     if chunk.get("status") == "loading":
-                        await writer.append(chunk)
+                        await writer.append(chunk, thread_id=target_thread_id)
                         continue
 
-                    await writer.flush()
+                    await writer.flush(target_thread_id)
                     status = chunk.get("status") or "event"
                     event_type, event_payload = _map_chunk_to_run_event(chunk)
                     if event_type != "end":
-                        await append_run_event(run_id, event_type, event_payload, thread_id=thread_id)
+                        await append_run_event(run_id, event_type, event_payload, thread_id=target_thread_id)
+
+                    if target_thread_id != thread_id:
+                        if await run_ctx.is_cancelled():
+                            raise asyncio.CancelledError(f"run {run_id} cancelled")
+                        continue
 
                     if status == "finished":
                         await mark_run_terminal(run_id, "completed")

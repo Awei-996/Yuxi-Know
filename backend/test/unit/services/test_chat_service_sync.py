@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from langchain.messages import AIMessage, HumanMessage
 
+from yuxi.agents.subagent_thread import make_child_thread_id
 from yuxi.services import chat_service as svc
 
 
@@ -19,6 +20,7 @@ async def _fake_normalize_agent_context_config(context, **_kwargs):
 class _FakeConvRepo:
     def __init__(self, _db):
         self.saved_messages: list[dict] = []
+        self.tool_calls: list[dict] = []
         self.conversations: dict[str, SimpleNamespace] = {}
 
     def _conversation(self, thread_id: str) -> SimpleNamespace:
@@ -59,6 +61,29 @@ class _FakeConvRepo:
     async def get_conversation_by_thread_id(self, thread_id: str):
         return self._conversation(thread_id)
 
+    async def get_messages_by_thread_id(self, _thread_id: str):
+        return []
+
+    async def add_tool_call(
+        self,
+        *,
+        message_id: int,
+        tool_name: str,
+        tool_input: dict | None = None,
+        status: str = "pending",
+        langgraph_tool_call_id: str | None = None,
+    ):
+        self.tool_calls.append(
+            {
+                "message_id": message_id,
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "status": status,
+                "langgraph_tool_call_id": langgraph_tool_call_id,
+            }
+        )
+        return SimpleNamespace(id=len(self.tool_calls))
+
     async def create_conversation(self, *, uid: str, agent_id: str, thread_id: str, metadata: dict | None = None):
         conversation = SimpleNamespace(
             id=1,
@@ -76,6 +101,56 @@ class _FakeConvRepo:
 
     async def bind_attachments_to_request(self, conversation_id: int, request_id: str, file_ids: list[str]):
         return []
+
+
+@pytest.mark.asyncio
+async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks() -> None:
+    class FakeGraph:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={
+                    "messages": [
+                        {
+                            "id": "ai-tool-call",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_call",
+                                    "id": "call-task-1",
+                                    "name": "task",
+                                    "args": {"description": "write file", "subagent_type": "worker"},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+
+    class FakeAgent:
+        async def get_graph(self):
+            return FakeGraph()
+
+    conv_repo = _FakeConvRepo(None)
+
+    await svc.save_messages_from_langgraph_state(
+        agent_instance=FakeAgent(),
+        thread_id="thread-1",
+        conv_repo=conv_repo,
+        config_dict={"configurable": {"thread_id": "thread-1", "uid": "user-1"}},
+        trace_info=None,
+    )
+
+    assert conv_repo.saved_messages[0]["content"] == ""
+    assert conv_repo.saved_messages[0]["extra_metadata"]["content"][0]["id"] == "call-task-1"
+    assert conv_repo.tool_calls == [
+        {
+            "message_id": 1,
+            "tool_name": "task",
+            "tool_input": {"description": "write file", "subagent_type": "worker"},
+            "status": "pending",
+            "langgraph_tool_call_id": "call-task-1",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -154,7 +229,7 @@ async def test_agent_chat_uses_invoke_messages_and_persists_langgraph_state(monk
     assert result["response"] == "Hi from invoke"
     assert result["thread_id"] == "thread-1"
     assert result["request_id"] == "req-1"
-    assert result["agent_state"] == {"todos": ["todo-1"], "files": {}, "artifacts": []}
+    assert result["agent_state"] == {"todos": ["todo-1"], "files": {}, "artifacts": [], "subagent_runs": []}
 
     invoke_messages = calls["invoke_messages"]
     assert isinstance(invoke_messages, list)
@@ -256,6 +331,81 @@ async def test_build_agent_input_context_merges_workspace_agents_prompt(monkeypa
     assert context["temperature"] == 0.1
     assert context["thread_id"] == "thread-1"
     assert context["uid"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_state_view_allows_recorded_child_thread(monkeypatch: pytest.MonkeyPatch):
+    child_thread_id = make_child_thread_id("parent-thread", "worker", "tool-1")
+
+    class ConvRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_conversation_by_thread_id(self, thread_id: str):
+            if thread_id == "parent-thread":
+                return SimpleNamespace(uid="user-1", agent_id="main-agent", status="active")
+            return None
+
+    class AgentRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_slug(self, slug: str):
+            if slug == "main-agent":
+                return SimpleNamespace(backend_id="ChatbotAgent")
+            if slug == "worker":
+                return SimpleNamespace(backend_id="SubAgentBackend")
+            return None
+
+    class Graph:
+        def __init__(self, values):
+            self.values = values
+
+        async def aget_state(self, config):
+            return SimpleNamespace(values=self.values(config["configurable"]["thread_id"]))
+
+    class Agent:
+        def __init__(self, values):
+            self.values = values
+
+        async def get_graph(self):
+            return Graph(self.values)
+
+    def parent_values(_thread_id: str):
+        return {
+            "subagent_runs": [
+                {
+                    "id": "tool-1",
+                    "subagent_type": "worker",
+                    "subagent_name": "Worker",
+                    "child_thread_id": child_thread_id,
+                    "status": "completed",
+                }
+            ]
+        }
+
+    def child_values(_thread_id: str):
+        return {"messages": [HumanMessage(content="do work"), AIMessage(content="done")], "artifacts": ["out.txt"]}
+
+    monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+    monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
+    monkeypatch.setattr(
+        svc.agent_manager,
+        "get_agent",
+        lambda backend_id: Agent(parent_values) if backend_id == "ChatbotAgent" else Agent(child_values),
+    )
+
+    result = await svc.get_agent_state_view(
+        thread_id=child_thread_id,
+        current_uid="user-1",
+        db=object(),
+        include_messages=True,
+    )
+
+    assert result["parent_thread_id"] == "parent-thread"
+    assert result["subagent_run"]["id"] == "tool-1"
+    assert result["agent_state"]["artifacts"] == ["out.txt"]
+    assert [message["type"] for message in result["messages"]] == ["human", "ai"]
 
 
 @pytest.mark.asyncio
