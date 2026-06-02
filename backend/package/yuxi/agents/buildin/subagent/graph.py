@@ -1,6 +1,9 @@
+from typing import Any
+
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
+from langchain.agents.middleware.types import AgentMiddleware
 
 from yuxi.agents import BaseAgent, BaseState, load_chat_model
 from yuxi.agents.backends import create_agent_filesystem_middleware
@@ -11,6 +14,29 @@ from yuxi.agents.middlewares import create_summary_middleware, save_attachments_
 from yuxi.agents.middlewares.knowledge_base_middleware import KnowledgeBaseMiddleware
 from yuxi.agents.middlewares.skills_middleware import SkillsMiddleware
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
+
+
+_SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "ask_user_question"})
+
+
+def _tool_name(tool) -> str | None:
+    if isinstance(tool, dict):
+        name = tool.get("name")
+    else:
+        name = getattr(tool, "name", None)
+    return name if isinstance(name, str) else None
+
+
+def _filter_disabled_tools(tools):
+    return [tool for tool in tools if _tool_name(tool) not in _SUBAGENT_DISABLED_TOOLS]
+
+
+class _SubAgentToolFilterMiddleware(AgentMiddleware[Any, Any, Any]):
+    def wrap_model_call(self, request, handler):
+        return handler(request.override(tools=_filter_disabled_tools(request.tools or [])))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(request.override(tools=_filter_disabled_tools(request.tools or [])))
 
 
 async def _build_middlewares(context):
@@ -33,6 +59,7 @@ async def _build_middlewares(context):
         summary_middleware,
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),
+        _SubAgentToolFilterMiddleware(),
         ModelRetryMiddleware(),
     ]
 
@@ -43,6 +70,28 @@ class SubAgentBackend(BaseAgent):
     capabilities = ["file_upload", "files"]
     context_schema = SubAgentContext
 
+    async def get_info(
+        self,
+        include_configurable_items: bool = True,
+        user_role: str | None = None,
+        db=None,
+        user=None,
+    ):
+        info = await super().get_info(
+            include_configurable_items=include_configurable_items,
+            user_role=user_role,
+            db=db,
+            user=user,
+        )
+        tools_item = (info.get("configurable_items") or {}).get("tools")
+        if isinstance(tools_item, dict):
+            tools_item["options"] = [
+                option
+                for option in tools_item.get("options") or []
+                if option.get("key") not in _SUBAGENT_DISABLED_TOOLS
+            ]
+        return info
+
     async def get_graph(self, context=None, **kwargs):
         context = await prepare_agent_runtime_context(
             context or self.context_schema(),
@@ -51,7 +100,7 @@ class SubAgentBackend(BaseAgent):
 
         return create_agent(
             model=load_chat_model(fully_specified_name=context.model),
-            tools=await resolve_configured_runtime_tools(context),
+            tools=_filter_disabled_tools(await resolve_configured_runtime_tools(context)),
             system_prompt=build_prompt_with_context(context),
             middleware=await _build_middlewares(context),
             state_schema=BaseState,

@@ -303,6 +303,7 @@ async def process_agent_run(ctx, run_id: str):
         request_id = run.request_id
 
     meta = {
+        "run_id": run_id,
         "request_id": request_id,
         "query": query,
         "agent_id": agent_id,

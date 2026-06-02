@@ -309,7 +309,19 @@ async def test_subagent_stream_records_run_and_shares_output_files(
         _assert_ok(child_state_response)
         child_state_payload = child_state_response.json()
         assert child_state_payload.get("parent_thread_id") == thread_id
-        assert (child_state_payload.get("subagent_run") or {}).get("child_thread_id") == child_thread_id
+        child_subagent_run = child_state_payload.get("subagent_run") or {}
+        assert child_subagent_run.get("child_thread_id") == child_thread_id
+        assert child_subagent_run.get("run_id")
+        child_run_response = await e2e_client.get(
+            f"/api/agent/runs/{child_subagent_run['run_id']}",
+            headers=e2e_headers,
+        )
+        _assert_ok(child_run_response)
+        child_run = child_run_response.json().get("run") or {}
+        assert child_run.get("run_type") == "subagent"
+        assert child_run.get("thread_id") == child_thread_id
+        assert child_run.get("parent_agent_run_id") == run_id
+        assert child_run.get("status") == "completed"
         assert child_state_payload.get("messages"), child_state_payload
 
         leaked_child_chunks = [
@@ -319,8 +331,10 @@ async def test_subagent_stream_records_run_and_shares_output_files(
 
         history_response = await e2e_client.get(f"/api/chat/thread/{thread_id}/history", headers=e2e_headers)
         _assert_ok(history_response)
-        tool_call_ids = _find_tool_call_ids(history_response.json())
+        history_payload = history_response.json()
+        tool_call_ids = _find_tool_call_ids(history_payload)
         assert str(completed_run["id"]) in tool_call_ids
+        assert child_thread_id in json.dumps(history_payload, ensure_ascii=False)
 
         files_response = await e2e_client.get(
             f"/api/chat/thread/{thread_id}/files",

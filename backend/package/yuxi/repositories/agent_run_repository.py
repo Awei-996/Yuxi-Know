@@ -36,6 +36,19 @@ class AgentRunRepository:
         result = await self.db.execute(select(AgentRun).where(and_(AgentRun.id == run_id, AgentRun.uid == str(uid))))
         return result.scalar_one_or_none()
 
+    async def get_latest_subagent_run_by_thread_for_user(self, thread_id: str, uid: str) -> AgentRun | None:
+        result = await self.db.execute(
+            select(AgentRun)
+            .where(
+                AgentRun.thread_id == thread_id,
+                AgentRun.uid == str(uid),
+                AgentRun.run_type == "subagent",
+            )
+            .order_by(AgentRun.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def create_run(
         self,
         *,
@@ -47,6 +60,7 @@ class AgentRunRepository:
         input_payload: dict,
         conversation_id: int | None = None,
         parent_run_id: str | None = None,
+        parent_agent_run_id: str | None = None,
         run_type: str = "chat",
         resume_request_id: str | None = None,
         checkpoint_thread_id: str | None = None,
@@ -59,6 +73,7 @@ class AgentRunRepository:
             request_id=request_id,
             conversation_id=conversation_id,
             parent_run_id=parent_run_id,
+            parent_agent_run_id=parent_agent_run_id,
             run_type=run_type,
             resume_request_id=resume_request_id,
             checkpoint_thread_id=checkpoint_thread_id or thread_id,

@@ -569,7 +569,9 @@ const ensureArray = (key) => {
   if (!config[key] || !Array.isArray(config[key])) {
     return []
   }
-  return config[key]
+  const validValues = new Set(getConfigOptions(configItem).map((option) => String(getOptionValue(option))))
+  if (validValues.size === 0) return config[key]
+  return config[key].filter((value) => validValues.has(String(value)))
 }
 
 const isOptionSelected = (key, option) => {

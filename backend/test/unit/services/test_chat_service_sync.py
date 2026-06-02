@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from langchain.messages import AIMessage, HumanMessage
 
-from yuxi.agents.subagent_thread import make_child_thread_id
+from yuxi.agents import context as agent_context
 from yuxi.services import chat_service as svc
 
 
@@ -207,7 +207,7 @@ async def test_agent_chat_uses_invoke_messages_and_persists_langgraph_state(monk
     monkeypatch.setattr(svc, "_build_langfuse_run_context", fake_build_langfuse_run_context)
     monkeypatch.setattr(svc, "get_trace_info", fake_get_trace_info)
     monkeypatch.setattr(svc, "flush_langfuse", lambda: calls.setdefault("flushed", True))
-    monkeypatch.setattr(svc, "_load_workspace_agents_prompt", _empty_agents_prompt)
+    monkeypatch.setattr(agent_context, "_load_workspace_agents_prompt", _empty_agents_prompt)
 
     monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
     monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
@@ -236,7 +236,13 @@ async def test_agent_chat_uses_invoke_messages_and_persists_langgraph_state(monk
     assert len(invoke_messages) == 1
     assert isinstance(invoke_messages[0], HumanMessage)
     assert invoke_messages[0].content == "hello"
-    assert calls["invoke_input_context"] == {"temperature": 0.1, "uid": "user-1", "thread_id": "thread-1"}
+    assert calls["invoke_input_context"] == {
+        "temperature": 0.1,
+        "uid": "user-1",
+        "thread_id": "thread-1",
+        "run_id": None,
+        "request_id": "req-1",
+    }
     assert calls["invoke_kwargs"] == {
         "callbacks": ["handler-1"],
         "metadata": {"langfuse_user_id": "user-1", "langfuse_session_id": "thread-1"},
@@ -290,7 +296,7 @@ async def test_agent_chat_sync_returns_finished_even_when_state_has_interrupt(mo
     )
     monkeypatch.setattr(svc, "get_trace_info", lambda _run_context: {})
     monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
-    monkeypatch.setattr(svc, "_load_workspace_agents_prompt", _empty_agents_prompt)
+    monkeypatch.setattr(agent_context, "_load_workspace_agents_prompt", _empty_agents_prompt)
 
     monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
     monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
@@ -319,9 +325,9 @@ async def test_build_agent_input_context_merges_workspace_agents_prompt(monkeypa
     def fake_agents_prompt(_thread_id: str, _uid: str) -> str:
         return "回答前先读取 AGENTS.md"
 
-    monkeypatch.setattr(svc, "_load_workspace_agents_prompt", fake_agents_prompt)
+    monkeypatch.setattr(agent_context, "_load_workspace_agents_prompt", fake_agents_prompt)
 
-    context = await svc._build_agent_input_context(
+    context = await agent_context.build_agent_input_context(
         {"system_prompt": "原始系统提示词", "temperature": 0.1},
         thread_id="thread-1",
         uid="user-1",
@@ -335,7 +341,7 @@ async def test_build_agent_input_context_merges_workspace_agents_prompt(monkeypa
 
 @pytest.mark.asyncio
 async def test_get_agent_state_view_allows_recorded_child_thread(monkeypatch: pytest.MonkeyPatch):
-    child_thread_id = make_child_thread_id("parent-thread", "worker", "tool-1")
+    child_thread_id = "opaque-child-thread"
 
     class ConvRepo:
         def __init__(self, _db):
@@ -343,7 +349,7 @@ async def test_get_agent_state_view_allows_recorded_child_thread(monkeypatch: py
 
         async def get_conversation_by_thread_id(self, thread_id: str):
             if thread_id == "parent-thread":
-                return SimpleNamespace(uid="user-1", agent_id="main-agent", status="active")
+                return SimpleNamespace(id=11, uid="user-1", agent_id="main-agent", status="active")
             return None
 
     class AgentRepo:
@@ -351,49 +357,60 @@ async def test_get_agent_state_view_allows_recorded_child_thread(monkeypatch: py
             pass
 
         async def get_by_slug(self, slug: str):
-            if slug == "main-agent":
-                return SimpleNamespace(backend_id="ChatbotAgent")
             if slug == "worker":
                 return SimpleNamespace(backend_id="SubAgentBackend")
             return None
 
-    class Graph:
-        def __init__(self, values):
-            self.values = values
+    class RunRepo:
+        def __init__(self, _db):
+            pass
 
-        async def aget_state(self, config):
-            return SimpleNamespace(values=self.values(config["configurable"]["thread_id"]))
-
-    class Agent:
-        def __init__(self, values):
-            self.values = values
-
-        async def get_graph(self):
-            return Graph(self.values)
-
-    def parent_values(_thread_id: str):
-        return {
-            "subagent_runs": [
-                {
-                    "id": "tool-1",
+        async def get_latest_subagent_run_by_thread_for_user(self, thread_id: str, uid: str):
+            assert thread_id == child_thread_id
+            assert uid == "user-1"
+            return SimpleNamespace(
+                id="sub-run-1",
+                thread_id=child_thread_id,
+                checkpoint_thread_id=child_thread_id,
+                agent_id="worker",
+                uid="user-1",
+                status="completed",
+                parent_agent_run_id="parent-run-1",
+                conversation_id=11,
+                input_payload={
+                    "tool_call_id": "tool-1",
                     "subagent_type": "worker",
                     "subagent_name": "Worker",
                     "child_thread_id": child_thread_id,
-                    "status": "completed",
-                }
-            ]
-        }
+                    "description": "do work",
+                },
+                error_message=None,
+                to_dict=lambda: {"created_at": "2026-05-31T01:00:00Z", "finished_at": "2026-05-31T01:00:03Z"},
+            )
 
-    def child_values(_thread_id: str):
-        return {"messages": [HumanMessage(content="do work"), AIMessage(content="done")], "artifacts": ["out.txt"]}
+        async def get_run_for_user(self, run_id: str, uid: str):
+            assert run_id == "parent-run-1"
+            assert uid == "user-1"
+            return SimpleNamespace(id="parent-run-1", thread_id="parent-thread", conversation_id=11)
+
+    class Graph:
+        async def aget_state(self, config):
+            assert config["configurable"]["thread_id"] == child_thread_id
+            return SimpleNamespace(
+                values={
+                    "messages": [HumanMessage(content="do work"), AIMessage(content="done")],
+                    "artifacts": ["out.txt"],
+                }
+            )
+
+    class Agent:
+        async def get_graph(self):
+            return Graph()
 
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
-    monkeypatch.setattr(
-        svc.agent_manager,
-        "get_agent",
-        lambda backend_id: Agent(parent_values) if backend_id == "ChatbotAgent" else Agent(child_values),
-    )
+    monkeypatch.setattr(svc, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(svc.agent_manager, "get_agent", lambda backend_id: Agent())
 
     result = await svc.get_agent_state_view(
         thread_id=child_thread_id,
@@ -404,6 +421,8 @@ async def test_get_agent_state_view_allows_recorded_child_thread(monkeypatch: py
 
     assert result["parent_thread_id"] == "parent-thread"
     assert result["subagent_run"]["id"] == "tool-1"
+    assert result["subagent_run"]["run_id"] == "sub-run-1"
+    assert result["subagent_run"]["child_thread_id"] == child_thread_id
     assert result["agent_state"]["artifacts"] == ["out.txt"]
     assert [message["type"] for message in result["messages"]] == ["human", "ai"]
 
@@ -412,9 +431,9 @@ async def test_get_agent_state_view_allows_recorded_child_thread(monkeypatch: py
 async def test_build_agent_input_context_keeps_prompt_when_workspace_agents_prompt_empty(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(svc, "_load_workspace_agents_prompt", _empty_agents_prompt)
+    monkeypatch.setattr(agent_context, "_load_workspace_agents_prompt", _empty_agents_prompt)
 
-    context = await svc._build_agent_input_context(
+    context = await agent_context.build_agent_input_context(
         {"system_prompt": "原始系统提示词"},
         thread_id="thread-1",
         uid="user-1",

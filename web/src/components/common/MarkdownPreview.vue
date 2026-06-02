@@ -157,7 +157,7 @@ const showCopiedFeedback = (btn) => {
   font-family:
     -apple-system, BlinkMacSystemFont, 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei',
     'Hiragino Sans GB', 'Source Han Sans CN', sans-serif;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   line-height: 1.75;
   word-break: break-word;
   padding: 0;
@@ -169,17 +169,17 @@ const showCopiedFeedback = (btn) => {
 
   h1,
   h2 {
-    font-size: 1.1rem;
+    font-size: 1rem;
   }
 
   h3,
   h4 {
-    font-size: 1.05rem;
+    font-size: 0.95rem;
   }
 
   h5,
   h6 {
-    font-size: 1rem;
+    font-size: 0.9rem;
   }
 
   strong {

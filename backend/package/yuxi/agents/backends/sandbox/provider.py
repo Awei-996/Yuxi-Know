@@ -13,16 +13,18 @@ from yuxi.utils.logging_config import logger
 from .provisioner_client import ProvisionerClient, SandboxRecord
 
 
-def sandbox_id_for_thread(thread_id: str, skills_thread_id: str | None = None) -> str:
+def sandbox_id_for_thread(thread_id: str, skills_thread_id: str | None = None, *, uid: str | None = None) -> str:
     file_thread_id = str(thread_id or "").strip()
     skills_id = str(skills_thread_id or file_thread_id).strip()
-    identity = file_thread_id if skills_id == file_thread_id else f"{file_thread_id}:{skills_id}"
+    uid_id = str(uid or "").strip()
+    scope = file_thread_id if skills_id == file_thread_id else f"{file_thread_id}:{skills_id}"
+    identity = f"{uid_id}:{scope}" if uid_id else scope
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return digest[:12]
 
 
-def _sandbox_key(file_thread_id: str, skills_thread_id: str) -> str:
-    return f"{file_thread_id}::{skills_thread_id}"
+def _sandbox_key(uid: str, file_thread_id: str, skills_thread_id: str) -> str:
+    return f"{uid}::{file_thread_id}::{skills_thread_id}"
 
 
 def normalize_env(env: dict | None) -> dict[str, str]:
@@ -147,7 +149,7 @@ class ProvisionerSandboxProvider:
     ) -> str:
         file_id = str(file_thread_id or thread_id).strip()
         skills_id = str(skills_thread_id or thread_id).strip()
-        cache_key = _sandbox_key(file_id, skills_id)
+        cache_key = _sandbox_key(uid, file_id, skills_id)
         lock = self._thread_lock(cache_key)
         with lock:
             current = self._connections.get(cache_key)
@@ -163,7 +165,7 @@ class ProvisionerSandboxProvider:
                     logger.warning(f"Failed to touch sandbox {current.sandbox_id} for {cache_key}: {exc}")
                     return current.sandbox_id
 
-            sandbox_id = sandbox_id_for_thread(file_id, skills_id)
+            sandbox_id = sandbox_id_for_thread(file_id, skills_id, uid=uid)
             logger.info(f"Ensuring sandbox {sandbox_id} for file thread {file_id} and skills thread {skills_id}")
             record = self._client.create(
                 sandbox_id,
@@ -195,7 +197,7 @@ class ProvisionerSandboxProvider:
     ) -> SandboxConnection | None:
         file_id = str(file_thread_id or thread_id).strip()
         skills_id = str(skills_thread_id or thread_id).strip()
-        cache_key = _sandbox_key(file_id, skills_id)
+        cache_key = _sandbox_key(uid, file_id, skills_id)
         lock = self._thread_lock(cache_key)
         with lock:
             current = self._connections.get(cache_key)
@@ -211,7 +213,7 @@ class ProvisionerSandboxProvider:
                     logger.warning(f"Failed to touch sandbox {current.sandbox_id} for {cache_key}: {exc}")
                     return current
 
-            sandbox_id = sandbox_id_for_thread(file_id, skills_id)
+            sandbox_id = sandbox_id_for_thread(file_id, skills_id, uid=uid)
             if create_if_missing:
                 record = self._client.create(
                     sandbox_id,

@@ -148,7 +148,7 @@ import { storeToRefs } from 'pinia'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { normalizeAttachmentPreviews } from '@/utils/file_utils'
 import { buildMentionDisplayLabels } from '@/utils/mention_utils'
-import { normalizeToolCalls } from '@/components/ToolCallingResult/toolRegistry'
+import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
 const props = defineProps({
   // 消息角色：'user'|'assistant'|'sent'|'received'
@@ -282,7 +282,7 @@ const messageSources = computed(() => {
   return { knowledgeChunks: [], webSources: [] }
 })
 
-const validToolCalls = computed(() => normalizeToolCalls(props.message.tool_calls))
+const validToolCalls = computed(() => enrichTaskToolCalls(props.message.tool_calls))
 
 const parsedData = computed(() => {
   const { content, reasoningContent } = MessageProcessor.parseAssistantMessageBody(props.message)

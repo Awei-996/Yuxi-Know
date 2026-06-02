@@ -155,7 +155,13 @@ async def test_stream_agent_chat_passes_langfuse_callbacks_and_persists_trace_in
     ):
         chunks.append(json.loads(chunk.decode("utf-8")))
 
-    assert calls["stream_input_context"] == {"temperature": 0.1, "uid": "user-1", "thread_id": "thread-1"}
+    assert calls["stream_input_context"] == {
+        "temperature": 0.1,
+        "uid": "user-1",
+        "thread_id": "thread-1",
+        "run_id": None,
+        "request_id": "req-1",
+    }
     assert calls["stream_kwargs"] == {
         "callbacks": ["handler-1"],
         "metadata": {"langfuse_user_id": "user-1", "langfuse_session_id": "thread-1"},

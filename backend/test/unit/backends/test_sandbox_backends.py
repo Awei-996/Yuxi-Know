@@ -174,10 +174,16 @@ def test_sandbox_id_for_thread_includes_skills_scope():
     assert sandbox_id_for_thread("parent-thread", "parent-thread") == parent_only
 
 
-def test_provider_rejects_same_sandbox_scope_for_different_uid(monkeypatch) -> None:
+def test_provider_uses_distinct_sandbox_scope_for_different_uid(monkeypatch) -> None:
     from yuxi.agents.backends.sandbox.provider import ProvisionerSandboxProvider
 
+    created = []
+
     class FakeClient:
+        def create(self, sandbox_id, thread_id, uid, env, *, file_thread_id=None, skills_thread_id=None):
+            created.append((sandbox_id, thread_id, uid, env, file_thread_id, skills_thread_id))
+            return SimpleNamespace(sandbox_id=sandbox_id, sandbox_url=f"http://sandbox/{uid}")
+
         def touch(self, _sandbox_id):
             return True
 
@@ -188,29 +194,24 @@ def test_provider_rejects_same_sandbox_scope_for_different_uid(monkeypatch) -> N
     provider._connections = {}
     provider._last_touch_at = {}
     provider._touch_interval_seconds = 30
-    provider._record_to_connection(
-        cache_key="parent-thread::child-skills-thread",
-        thread_id="child-thread",
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.provider.load_user_agent_env", lambda uid: {"A": uid})
+
+    sandbox_1 = provider.acquire(
+        "child-thread",
+        uid="user-1",
         file_thread_id="parent-thread",
         skills_thread_id="child-skills-thread",
-        uid="user-1",
-        record=SimpleNamespace(sandbox_id="sandbox-1", sandbox_url="http://sandbox"),
+    )
+    sandbox_2 = provider.acquire(
+        "child-thread",
+        uid="user-2",
+        file_thread_id="parent-thread",
+        skills_thread_id="child-skills-thread",
     )
 
-    with pytest.raises(RuntimeError, match="belongs to uid user-1"):
-        provider.get(
-            "child-thread",
-            uid="user-2",
-            file_thread_id="parent-thread",
-            skills_thread_id="child-skills-thread",
-        )
-    with pytest.raises(RuntimeError, match="belongs to uid user-1"):
-        provider.acquire(
-            "child-thread",
-            uid="user-2",
-            file_thread_id="parent-thread",
-            skills_thread_id="child-skills-thread",
-        )
+    assert sandbox_1 != sandbox_2
+    assert created[0][2] == "user-1"
+    assert created[1][2] == "user-2"
 
 
 def test_provider_get_create_if_missing_ensures_expected_split_scope(monkeypatch) -> None:
@@ -243,7 +244,7 @@ def test_provider_get_create_if_missing_ensures_expected_split_scope(monkeypatch
         skills_thread_id="child-skills-thread",
     )
 
-    sandbox_id = sandbox_id_for_thread("parent-thread", "child-skills-thread")
+    sandbox_id = sandbox_id_for_thread("parent-thread", "child-skills-thread", uid="user-1")
     assert connection.sandbox_id == sandbox_id
     assert connection.file_thread_id == "parent-thread"
     assert connection.skills_thread_id == "child-skills-thread"

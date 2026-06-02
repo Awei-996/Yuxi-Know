@@ -448,9 +448,18 @@ class PostgresManager(metaclass=SingletonMeta):
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
             """,
+            "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS parent_agent_run_id VARCHAR(64)",
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_uid_created ON agent_runs(uid, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_thread_created ON agent_runs(thread_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_status_updated ON agent_runs(status, updated_at)",
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_parent_agent_run_created
+            ON agent_runs(parent_agent_run_id, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_subagent_lookup
+            ON agent_runs(uid, thread_id, run_type, created_at DESC)
+            """,
             "CREATE INDEX IF NOT EXISTS ix_conversations_is_pinned ON conversations(is_pinned)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_model_providers_provider_id ON model_providers(provider_id)",
             "CREATE INDEX IF NOT EXISTS ix_model_providers_is_enabled ON model_providers(is_enabled)",

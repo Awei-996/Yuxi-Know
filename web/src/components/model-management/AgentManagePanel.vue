@@ -140,7 +140,7 @@ const getAgentShareAllowedLevels = () => {
 
 const canManageAgent = (agent) => !!agent?.can_manage
 const agentModalTitle = computed(() => (editingAgentId.value ? '编辑智能体' : '新增智能体'))
-const getAgentIconSrc = (agent) => agent.icon || generatePixelAvatar(agent.id)
+const getAgentIconSrc = (agent) => agent.icon || (agent.id ? generatePixelAvatar(agent.id) : '')
 const getAgentTags = (agent) => [
   ...(agent?.is_subagent ? [{ name: '子智能体', color: 'purple' }] : []),
   ...(agent?.backend_id ? [{ name: agent.backend_id, color: 'blue' }] : [])
@@ -397,6 +397,7 @@ defineExpose({
       >
         <template #icon>
           <img
+            v-if="getAgentIconSrc(agent)"
             class="agent-card-icon-image"
             :src="getAgentIconSrc(agent)"
             :alt="`${agent.name || '智能体'}图标`"
@@ -495,7 +496,6 @@ defineExpose({
                         :src="agentPreviewIcon"
                         :alt="`${agentForm.name || '智能体'}图标`"
                       />
-                      <Bot v-else :size="32" />
                       <div class="agent-icon-mask">
                         <RefreshCw v-if="agentIconUploading" :size="14" class="spinning" />
                         <Upload v-else :size="14" />
@@ -592,14 +592,6 @@ defineExpose({
   min-height: 0;
 }
 
-.agent-card {
-  :deep(.info-card-icon) {
-    border-color: var(--main-100);
-    background:
-      radial-gradient(circle at 35% 25%, rgba(255, 255, 255, 0.9), transparent 38%),
-      linear-gradient(145deg, var(--main-10), var(--gray-0));
-  }
-}
 
 .agent-card-icon-image {
   display: block;

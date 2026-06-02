@@ -1,10 +1,15 @@
 """Define the configurable parameters for the agent."""
 
+import asyncio
 import uuid
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, get_origin
 
 from yuxi import config as sys_config
+from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agents_prompt_file
+from yuxi.utils.logging_config import logger
+
+WORKSPACE_AGENTS_PROMPT_MAX_BYTES = 64 * 1024
 
 
 def _role_can_access(auth: str | None, role: str | None) -> bool:
@@ -15,6 +20,48 @@ def _role_can_access(auth: str | None, role: str | None) -> bool:
     if auth == "superadmin":
         return role == "superadmin"
     return False
+
+
+def _load_workspace_agents_prompt(thread_id: str, uid: str) -> str:
+    prompt_file = sandbox_workspace_agents_prompt_file(thread_id, uid)
+    try:
+        with prompt_file.open("rb") as buffer:
+            content = buffer.read(WORKSPACE_AGENTS_PROMPT_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return ""
+    except IsADirectoryError:
+        logger.warning("读取工作区 AGENTS.md 失败: 路径是目录")
+        return ""
+    except OSError as exc:
+        logger.warning(f"读取工作区 AGENTS.md 失败: {exc}")
+        return ""
+
+    prompt = content[:WORKSPACE_AGENTS_PROMPT_MAX_BYTES].decode("utf-8", errors="replace").strip()
+    if not prompt:
+        return ""
+    if len(content) > WORKSPACE_AGENTS_PROMPT_MAX_BYTES:
+        return f"{prompt}\n\n[AGENTS.md 内容已截断]"
+    return prompt
+
+
+async def build_agent_input_context(
+    agent_config: dict | None,
+    *,
+    thread_id: str,
+    uid: str,
+    run_id: str | None = None,
+    request_id: str | None = None,
+) -> dict:
+    input_context = dict(agent_config or {})
+    agents_prompt = await asyncio.to_thread(_load_workspace_agents_prompt, thread_id, uid)
+
+    if agents_prompt:
+        agents_section = f"用户工作区 agents/AGENTS.md 内容：\n{agents_prompt}"
+        base_prompt = str(input_context.get("system_prompt") or "").rstrip()
+        input_context["system_prompt"] = f"{base_prompt}\n\n{agents_section}" if base_prompt else agents_section
+
+    input_context.update({"uid": uid, "thread_id": thread_id, "run_id": run_id, "request_id": request_id})
+    return input_context
 
 
 def filter_config_by_role(
@@ -66,6 +113,16 @@ class BaseContext:
     uid: str = field(
         default_factory=lambda: str(uuid.uuid4()),
         metadata={"name": "UID", "configurable": False, "description": "用来唯一标识一个用户"},
+    )
+
+    run_id: str | None = field(
+        default=None,
+        metadata={"name": "运行 ID", "configurable": False, "hide": True},
+    )
+
+    request_id: str | None = field(
+        default=None,
+        metadata={"name": "请求 ID", "configurable": False, "hide": True},
     )
 
     system_prompt: str = field(

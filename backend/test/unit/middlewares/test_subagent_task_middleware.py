@@ -7,8 +7,9 @@ import yuxi.agents.middlewares.subagent_task_middleware as subagent_task_middlew
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.prebuilt.tool_node import ToolRuntime
 from langgraph.types import Command
+from yuxi.agents.buildin.chatbot.state import merge_subagent_runs
 from yuxi.agents.middlewares.subagent_task_middleware import YuxiSubAgentMiddleware
-from yuxi.agents.subagent_thread import make_child_thread_id
+from yuxi.utils.subagent_thread_utils import make_child_thread_id
 from yuxi.repositories.agent_repository import SUB_AGENT_BACKEND_ID
 
 
@@ -20,6 +21,34 @@ class _ChildContext:
         for key, value in values.items():
             if hasattr(self, key):
                 setattr(self, key, value)
+
+
+def _patch_subagent_run_tracking(monkeypatch):
+    async def create_run(_self, **kwargs):
+        return SimpleNamespace(
+            id=f"sub-run-{kwargs['tool_call_id']}",
+            request_id=f"sub-req-{kwargs['tool_call_id']}",
+            status="running",
+            parent_agent_run_id="parent-run",
+            created_at=None,
+            finished_at=None,
+            error_message=None,
+        ), True
+
+    async def set_status(_self, run_id, status, *, error_type=None, error_message=None):
+        del error_type
+        return SimpleNamespace(
+            id=run_id,
+            request_id=run_id.replace("sub-run", "sub-req"),
+            status=status,
+            parent_agent_run_id="parent-run",
+            created_at=None,
+            finished_at=None,
+            error_message=error_message,
+        )
+
+    monkeypatch.setattr(YuxiSubAgentMiddleware, "_create_subagent_run", create_run)
+    monkeypatch.setattr(YuxiSubAgentMiddleware, "_set_subagent_run_status", set_status)
 
 
 @pytest.mark.asyncio
@@ -111,6 +140,7 @@ async def test_task_tool_rejects_unconfigured_subagent() -> None:
 
 @pytest.mark.asyncio
 async def test_task_tool_invokes_subagent_with_child_scope(monkeypatch) -> None:
+    _patch_subagent_run_tracking(monkeypatch)
     captured = {}
 
     class _Graph:
@@ -180,7 +210,7 @@ async def test_task_tool_invokes_subagent_with_child_scope(monkeypatch) -> None:
 
     child_thread_id = make_child_thread_id("parent-thread", "worker.agent", "tool-1")
     assert isinstance(result, Command)
-    assert result.update["messages"][0].content == "child done"
+    assert result.update["messages"][0].content == f"子智能体线程 ID: {child_thread_id}\n\nchild done"
     assert result.update["messages"][0].tool_call_id == "tool-1"
     assert result.update["artifacts"] == ["/home/gem/user-data/outputs/report.md"]
     assert result.update["subagent_runs"] == [
@@ -191,6 +221,8 @@ async def test_task_tool_invokes_subagent_with_child_scope(monkeypatch) -> None:
             "child_thread_id": child_thread_id,
             "description": "write a report",
             "created_at": "2026-05-31T01:00:00Z",
+            "run_id": "sub-run-tool-1",
+            "parent_agent_run_id": "parent-run",
             "status": "completed",
             "completed_at": "2026-05-31T01:00:03Z",
             "result_preview": "child done",
@@ -198,7 +230,7 @@ async def test_task_tool_invokes_subagent_with_child_scope(monkeypatch) -> None:
             "artifacts": ["/home/gem/user-data/outputs/report.md"],
         }
     ]
-    assert captured["state"]["kept"] == "value"
+    assert "kept" not in captured["state"]
     assert captured["state"]["parent_thread_id"] == "parent-thread"
     assert captured["state"]["file_thread_id"] == "parent-file-thread"
     assert captured["state"]["skills_thread_id"] == child_thread_id
@@ -214,6 +246,11 @@ async def test_task_tool_invokes_subagent_with_child_scope(monkeypatch) -> None:
         "parent_thread_id": "parent-thread",
         "file_thread_id": "parent-file-thread",
         "skills_thread_id": child_thread_id,
+        "subagent_type": "worker.agent",
+        "subagent_thread_id": child_thread_id,
+        "subagent_tool_call_id": "tool-1",
+        "run_id": "sub-run-tool-1",
+        "request_id": "sub-req-tool-1",
         "ls_agent_type": "subagent",
     }
     assert captured["context"] is captured["graph_context"]
@@ -228,6 +265,8 @@ async def test_task_tool_invokes_subagent_with_child_scope(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_task_tool_records_failed_subagent_run(monkeypatch) -> None:
+    _patch_subagent_run_tracking(monkeypatch)
+
     class _Graph:
         async def ainvoke(self, state, *, config, context):
             del state, config, context
@@ -269,21 +308,235 @@ async def test_task_tool_records_failed_subagent_run(monkeypatch) -> None:
     )
 
     assert isinstance(result, Command)
-    assert result.update["messages"][0].content == "子智能体 worker 调用失败：child boom"
+    child_thread_id = make_child_thread_id("parent-thread", "worker", "tool-1")
+    assert (
+        result.update["messages"][0].content
+        == f"子智能体线程 ID: {child_thread_id}\n\n子智能体 worker 调用失败：child boom"
+    )
     assert result.update["subagent_runs"] == [
         {
             "id": "tool-1",
             "subagent_type": "worker",
             "subagent_name": "Worker",
-            "child_thread_id": make_child_thread_id(
-                "parent-thread", "worker", "tool-1"
-            ),
+            "child_thread_id": child_thread_id,
             "description": "write a report",
             "created_at": "2026-05-31T02:00:00Z",
+            "run_id": "sub-run-tool-1",
+            "parent_agent_run_id": "parent-run",
             "status": "failed",
             "completed_at": "2026-05-31T02:00:04Z",
             "result_preview": "子智能体 worker 调用失败：child boom",
             "error": "child boom",
             "artifacts": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_tool_continues_existing_subagent_thread(monkeypatch) -> None:
+    _patch_subagent_run_tracking(monkeypatch)
+    captured = {}
+
+    class _Graph:
+        async def ainvoke(self, state, *, config, context):
+            captured["state"] = state
+            captured["config"] = config
+            captured["context"] = context
+            return {"messages": [AIMessage(content="continued done")]}
+
+    class _Backend:
+        context_schema = _ChildContext
+
+        async def get_graph(self, *, context):
+            captured["graph_context"] = context
+            return _Graph()
+
+    monkeypatch.setattr(
+        subagent_task_middleware,
+        "_get_agent_backend",
+        lambda backend_id: _Backend() if backend_id == SUB_AGENT_BACKEND_ID else None,
+    )
+    times = iter(["2026-05-31T03:00:00Z", "2026-05-31T03:00:05Z"])
+    monkeypatch.setattr(subagent_task_middleware, "utc_isoformat", lambda: next(times))
+
+    child_thread_id = make_child_thread_id("parent-thread", "worker.agent", "tool-old")
+    middleware = YuxiSubAgentMiddleware(
+        parent_context=SimpleNamespace(thread_id="parent-thread", uid="user-1"),
+        subagents=[
+            SimpleNamespace(
+                slug="worker.agent",
+                name="Worker",
+                description="work on scoped tasks",
+                backend_id=SUB_AGENT_BACKEND_ID,
+                config_json={},
+            )
+        ],
+    )
+    runtime = SimpleNamespace(
+        tool_call_id="tool-2",
+        state={
+            "subagent_runs": [
+                {
+                    "id": "tool-old",
+                    "subagent_type": "worker.agent",
+                    "child_thread_id": child_thread_id,
+                    "status": "completed",
+                }
+            ],
+            "kept": "parent-value",
+        },
+        config={"configurable": {"checkpoint_ns": "parent-ns"}},
+    )
+
+    result = await middleware.tools[0].coroutine(
+        description="continue the report",
+        subagent_type="worker.agent",
+        runtime=runtime,
+        thread_id=child_thread_id,
+    )
+
+    assert isinstance(result, Command)
+    assert result.update["messages"][0].content == f"子智能体线程 ID: {child_thread_id}\n\ncontinued done"
+    assert result.update["subagent_runs"] == [
+        {
+            "id": "tool-2",
+            "subagent_type": "worker.agent",
+            "subagent_name": "Worker",
+            "child_thread_id": child_thread_id,
+            "description": "continue the report",
+            "created_at": "2026-05-31T03:00:00Z",
+            "run_id": "sub-run-tool-2",
+            "parent_agent_run_id": "parent-run",
+            "status": "completed",
+            "completed_at": "2026-05-31T03:00:05Z",
+            "result_preview": "continued done",
+            "error": None,
+            "artifacts": [],
+        }
+    ]
+    assert captured["state"] == {
+        "parent_thread_id": "parent-thread",
+        "file_thread_id": "parent-thread",
+        "skills_thread_id": child_thread_id,
+        "messages": [HumanMessage(content="continue the report")],
+    }
+    assert captured["config"]["configurable"] == {
+        "thread_id": child_thread_id,
+        "uid": "user-1",
+        "parent_thread_id": "parent-thread",
+        "file_thread_id": "parent-thread",
+        "skills_thread_id": child_thread_id,
+        "subagent_type": "worker.agent",
+        "subagent_thread_id": child_thread_id,
+        "subagent_tool_call_id": "tool-2",
+        "run_id": "sub-run-tool-2",
+        "request_id": "sub-req-tool-2",
+        "ls_agent_type": "subagent",
+    }
+    assert captured["context"] is captured["graph_context"]
+    assert captured["context"].thread_id == child_thread_id
+
+
+@pytest.mark.asyncio
+async def test_task_tool_rejects_invalid_continuation_thread(monkeypatch) -> None:
+    graph_called = False
+
+    class _Backend:
+        context_schema = _ChildContext
+
+        async def get_graph(self, *, context):
+            nonlocal graph_called
+            del context
+            graph_called = True
+            raise AssertionError("invalid continuation should not invoke graph")
+
+    async def reject_continuation(_self, **kwargs):
+        raise ValueError(f"无法继续子智能体线程 {kwargs['child_thread_id']}：当前对话中没有找到对应的子智能体运行记录")
+
+    monkeypatch.setattr(
+        subagent_task_middleware,
+        "_get_agent_backend",
+        lambda backend_id: _Backend() if backend_id == SUB_AGENT_BACKEND_ID else None,
+    )
+    monkeypatch.setattr(YuxiSubAgentMiddleware, "_create_subagent_run", reject_continuation)
+
+    middleware = YuxiSubAgentMiddleware(
+        parent_context=SimpleNamespace(thread_id="parent-thread", uid="user-1", run_id="parent-run"),
+        subagents=[
+            SimpleNamespace(
+                slug="worker",
+                name="Worker",
+                description="work on scoped tasks",
+                backend_id=SUB_AGENT_BACKEND_ID,
+                config_json={},
+            )
+        ],
+    )
+
+    unknown_thread_id = "opaque-child-thread"
+    runtime = SimpleNamespace(tool_call_id="tool-2", state={}, config={})
+    result = await middleware.tools[0].coroutine(
+        description="continue",
+        subagent_type="worker",
+        runtime=runtime,
+        thread_id=unknown_thread_id,
+    )
+
+    assert result == f"无法继续子智能体线程 {unknown_thread_id}：当前对话中没有找到对应的子智能体运行记录"
+    assert graph_called is False
+
+
+def test_make_child_thread_id_fits_agent_run_thread_column() -> None:
+    child_thread_id = make_child_thread_id(
+        "fa62c751-d124-476f-a58c-855890aebcc4",
+        "agent-with-a-very-long-slug-that-would-overflow-the-column",
+        "019e86570b418b4ea6b5aee3ef87b1fa",
+    )
+
+    assert len(child_thread_id) <= 64
+    assert child_thread_id == make_child_thread_id(
+        "fa62c751-d124-476f-a58c-855890aebcc4",
+        "agent-with-a-very-long-slug-that-would-overflow-the-column",
+        "019e86570b418b4ea6b5aee3ef87b1fa",
+    )
+
+
+def test_merge_subagent_runs_reuses_child_thread_entry() -> None:
+    child_thread_id = make_child_thread_id("parent-thread", "worker", "tool-old")
+
+    merged = merge_subagent_runs(
+        [
+            {
+                "id": "tool-old",
+                "subagent_type": "worker",
+                "subagent_name": "Worker",
+                "child_thread_id": child_thread_id,
+                "description": "first task",
+                "status": "completed",
+                "created_at": "2026-05-31T01:00:00Z",
+            }
+        ],
+        [
+            {
+                "id": "tool-new",
+                "subagent_type": "worker",
+                "subagent_name": "Worker",
+                "child_thread_id": child_thread_id,
+                "description": "continue task",
+                "status": "completed",
+                "created_at": "2026-05-31T02:00:00Z",
+            }
+        ],
+    )
+
+    assert merged == [
+        {
+            "id": "tool-new",
+            "subagent_type": "worker",
+            "subagent_name": "Worker",
+            "child_thread_id": child_thread_id,
+            "description": "continue task",
+            "status": "completed",
+            "created_at": "2026-05-31T02:00:00Z",
         }
     ]

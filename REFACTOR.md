@@ -25,6 +25,8 @@
 - [x] allow user config envs
 - [ ] add model retry times to agent context config
 - [ ] 添加用户级别的 Skills 的安装
+- [ ] Skill 卡片优化
+- [ ] 子智能体的消息渲染与可视化
 - [x] 子智能体的优化，参考 PR 的方案。
 - [x] 附件上传能够支持转换为 PDF，待办：查看 OCR 模型的状态，样式优化，保存的文件名不对
 - [x] 参考 PR，实现内置 Dashscope 的 Embedding 和 rerank 的方法
@@ -46,3 +48,4 @@
 - [x] parser 从plugins 移动到 knowledge 里面，guard 移动到services 里面
 - [x] neo4j 相关的服务，可以移动到 storage 里面
 - [ ] 点开对话的时候要能够自动定位到尾部，而不是最开始。
+- [ ] 将 Qwen-Image 修改为 Skill，暴露一个工具，叫做上传图片到 MINIO，这样生成图片的时候就可以调用别的接口生成图片，并可以上传到 MINIO 上面。也就是将原本生成图片的逻辑移动到 Skill 里面来实现，这样就可以支持多种生成图片的模型了。接入多种的接口

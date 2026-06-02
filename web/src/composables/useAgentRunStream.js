@@ -171,6 +171,34 @@ export function useAgentRunStream({
     }
   }
 
+  const finalizeRunStream = (threadId, runId, touchedThreadIds, { delay = 200, scroll = false } = {}) => {
+    const ts = getThreadState(threadId)
+    if (!ts || ts.activeRunId !== runId) return
+    touchedThreadIds.forEach((id) => streamSmoother?.flushThread(id))
+    ts.isStreaming = false
+    ts.activeRunId = null
+    ts.lastRetryableJobTry = null
+    ts.replyLoadingVisible = false
+    ts.pendingRequestId = null
+    clearActiveRunSnapshot(threadId)
+    fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay }).finally(() => {
+      resetOnGoingConv(threadId)
+      fetchAgentState(unref(currentAgentId), threadId)
+      if (scroll) onScrollToBottom()
+    })
+  }
+
+  const scheduleRunReconnect = (threadId, runId, delay = 500) => {
+    const ts = getThreadState(threadId)
+    if (!ts || ts.activeRunId !== runId) return
+    setTimeout(() => {
+      const latest = getThreadState(threadId)
+      if (latest?.activeRunId === runId && !latest.runStreamAbortController) {
+        void startRunStream(threadId, runId, latest.runLastSeq)
+      }
+    }, delay)
+  }
+
   const startRunStream = async (threadId, runId, afterSeq = '0-0') => {
     if (!threadId || !runId) return
     const ts = getThreadState(threadId)
@@ -185,6 +213,7 @@ export function useAgentRunStream({
     ts.isStreaming = true
     saveActiveRunSnapshot(threadId, runId, ts.runLastSeq)
     const touchedThreadIds = new Set([threadId])
+    let sawTerminalEvent = false
 
     try {
       const response = await agentApi.streamAgentRunEvents(runId, ts.runLastSeq, {
@@ -253,52 +282,41 @@ export function useAgentRunStream({
         }
 
         if (event === 'end') {
-          touchedThreadIds.forEach((id) => streamSmoother?.flushThread(id))
-          ts.isStreaming = false
+          sawTerminalEvent = true
           if (RUN_TERMINAL_STATUSES.has(terminalStatus)) {
-            ts.activeRunId = null
-            ts.lastRetryableJobTry = null
-            ts.replyLoadingVisible = false
-            ts.pendingRequestId = null
-            clearActiveRunSnapshot(threadId)
-            fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay: 200 }).finally(
-              () => {
-                resetOnGoingConv(threadId)
-                fetchAgentState(unref(currentAgentId), threadId)
-              }
-            )
+            finalizeRunStream(threadId, runId, touchedThreadIds)
+          } else {
+            touchedThreadIds.forEach((id) => streamSmoother?.flushThread(id))
+            ts.isStreaming = false
           }
         }
 
         if (event === 'error') {
-          touchedThreadIds.forEach((id) => streamSmoother?.flushThread(id))
-          ts.isStreaming = false
-          ts.activeRunId = null
-          ts.lastRetryableJobTry = null
-          ts.replyLoadingVisible = false
-          ts.pendingRequestId = null
-          clearActiveRunSnapshot(threadId)
-          fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay: 300 }).finally(
-            () => {
-              resetOnGoingConv(threadId)
-              fetchAgentState(unref(currentAgentId), threadId)
-              onScrollToBottom()
-            }
-          )
+          sawTerminalEvent = true
+          finalizeRunStream(threadId, runId, touchedThreadIds, { delay: 300, scroll: true })
         }
       })
+
+      if (!sawTerminalEvent && !runController.signal.aborted && ts.activeRunId === runId) {
+        try {
+          const runRes = await agentApi.getAgentRun(runId)
+          const run = runRes?.run
+          if (run && RUN_TERMINAL_STATUSES.has(run.status)) {
+            finalizeRunStream(threadId, runId, touchedThreadIds)
+          } else {
+            scheduleRunReconnect(threadId, runId)
+          }
+        } catch (e) {
+          console.warn('Run SSE closed before terminal event; reconnecting after status check failed:', e)
+          scheduleRunReconnect(threadId, runId)
+        }
+      }
     } catch (error) {
       if (error?.name !== 'AbortError') {
         streamSmoother?.flushThread(threadId)
         console.error('Run SSE stream error:', error)
         handleChatError(error, 'stream')
-        if (ts.activeRunId === runId) {
-          setTimeout(() => {
-            if (ts.activeRunId === runId && !ts.runStreamAbortController) {
-              void startRunStream(threadId, runId, ts.runLastSeq)
-            }
-          }, 500)
-        }
+        scheduleRunReconnect(threadId, runId)
       } else if (ts.activeRunId !== runId) {
         ts.replyLoadingVisible = false
         ts.pendingRequestId = null

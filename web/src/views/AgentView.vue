@@ -36,11 +36,6 @@
                 @click.stop
                 @mousedown.stop
               >
-                <img
-                  class="config-dropdown-agent-icon nav-btn-icon"
-                  :src="currentAgentIcon"
-                  :alt="`${currentAgentLabel}图标`"
-                />
                 <span class="hide-text config-dropdown-text">{{ currentAgentLabel }}</span>
                 <ChevronDown size="15" class="config-dropdown-chevron" />
               </button>
@@ -59,10 +54,12 @@
                     @click="handleAgentSwitch(agent.value, hasActiveThread)"
                   >
                     <img
+                      v-if="agent.icon"
                       class="config-dropdown-item-icon-image"
                       :src="agent.icon"
                       :alt="`${agent.label}图标`"
                     />
+                    <span v-else class="config-dropdown-item-icon-empty" aria-hidden="true"></span>
                     <span class="config-dropdown-item-label">{{ agent.label }}</span>
                     <span v-if="agent.isBuiltin" class="config-dropdown-item-badge">内置</span>
                     <Check
@@ -248,7 +245,7 @@ const agentQuickSwitchOptions = computed(() =>
     .map((agent) => ({
       label: agent.name || agent.id,
       value: agent.id,
-      icon: agent.icon || generatePixelAvatar(agent.id),
+      icon: agent.icon || (agent.id ? generatePixelAvatar(agent.id) : ''),
       isBuiltin: isBuiltinAgent(agent)
     }))
 )
@@ -261,8 +258,6 @@ const currentAgentLabel = computed(() => {
   if (isLoadingConfig.value) return '加载中...'
   return currentAgentOption.value?.label || '智能体'
 })
-
-const currentAgentIcon = computed(() => currentAgentOption.value?.icon)
 
 const inputModelKey = computed(() => {
   if (configurableItems.value?.model?.kind === 'llm') return 'model'
@@ -445,18 +440,6 @@ const handleFeedback = () => {
   gap: 4px;
 }
 
-.config-dropdown-trigger .nav-btn-icon {
-  color: currentColor;
-}
-
-.config-dropdown-agent-icon {
-  width: 18px;
-  height: 18px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  object-fit: cover;
-}
-
 .config-dropdown-trigger :deep(svg) {
   color: currentColor;
 }
@@ -635,7 +618,8 @@ const handleFeedback = () => {
 }
 
 .config-dropdown-overlay .config-dropdown-item-icon,
-.config-dropdown-overlay .config-dropdown-item-icon-image {
+.config-dropdown-overlay .config-dropdown-item-icon-image,
+.config-dropdown-overlay .config-dropdown-item-icon-empty {
   flex-shrink: 0;
 }
 
@@ -643,11 +627,15 @@ const handleFeedback = () => {
   color: var(--gray-500);
 }
 
-.config-dropdown-overlay .config-dropdown-item-icon-image {
+.config-dropdown-overlay .config-dropdown-item-icon-image,
+.config-dropdown-overlay .config-dropdown-item-icon-empty {
   width: 24px;
   height: 24px;
-  object-fit: cover;
   border-radius: 4px;
+}
+
+.config-dropdown-overlay .config-dropdown-item-icon-image {
+  object-fit: cover;
 }
 
 .config-dropdown-overlay .config-dropdown-item-badge {

@@ -729,7 +729,8 @@ class AgentRun(Base):
         Integer, ForeignKey("conversations.id"), nullable=True, index=True, comment="Conversation ID"
     )
     parent_run_id = Column(String(64), nullable=True, index=True, comment="Parent interrupted run ID")
-    run_type = Column(String(32), nullable=False, default="chat", comment="Run type: chat/resume")
+    parent_agent_run_id = Column(String(64), nullable=True, index=True, comment="Parent agent run ID")
+    run_type = Column(String(32), nullable=False, default="chat", comment="Run type: chat/resume/subagent")
     resume_request_id = Column(String(64), nullable=True, index=True, comment="Resume idempotency request ID")
     input_message_id = Column(Integer, nullable=True, comment="Input message ID")
     output_message_id = Column(Integer, nullable=True, comment="Output message ID")
@@ -753,6 +754,7 @@ class AgentRun(Base):
             "request_id": self.request_id,
             "conversation_id": self.conversation_id,
             "parent_run_id": self.parent_run_id,
+            "parent_agent_run_id": self.parent_agent_run_id,
             "run_type": self.run_type,
             "resume_request_id": self.resume_request_id,
             "input_message_id": self.input_message_id,

@@ -65,6 +65,34 @@ export const isValidToolCall = (toolCall) => {
   )
 }
 
+export const parseToolCallArgs = (toolCall) => {
+  const args = toolCall?.args ?? toolCall?.function?.arguments
+  if (!args) return {}
+  if (typeof args === 'object') return args
+  try {
+    return JSON.parse(args)
+  } catch {
+    return {}
+  }
+}
+
+export const enrichTaskToolCall = (toolCall, { subagentRunById, subagentRunByThreadId, subagentOptionBySlug } = {}) => {
+  if (getToolCallId(toolCall) !== 'task') return toolCall
+
+  const args = parseToolCallArgs(toolCall)
+  const subagentRun =
+    (toolCall.id ? subagentRunById?.get?.(String(toolCall.id)) : null) ||
+    (args.thread_id ? subagentRunByThreadId?.get?.(String(args.thread_id)) : null)
+  const subagentOption = args.subagent_type ? subagentOptionBySlug?.get?.(String(args.subagent_type)) : null
+  const displayLabel = subagentRun?.subagent_name || subagentOption?.name || subagentRun?.subagent_type || undefined
+
+  return {
+    ...toolCall,
+    ...(subagentRun ? { subagent_run: subagentRun } : {}),
+    ...(displayLabel ? { display_label: displayLabel } : {})
+  }
+}
+
 export const normalizeToolCalls = (toolCalls, { includeHidden = false, mapToolCall } = {}) => {
   if (!Array.isArray(toolCalls)) return []
 
@@ -75,5 +103,8 @@ export const normalizeToolCalls = (toolCalls, { includeHidden = false, mapToolCa
     })
     .map((toolCall) => (mapToolCall ? mapToolCall(toolCall) : toolCall))
 }
+
+export const enrichTaskToolCalls = (toolCalls, options = {}) =>
+  normalizeToolCalls(toolCalls, { mapToolCall: (toolCall) => enrichTaskToolCall(toolCall, options) })
 
 export const getToolIcon = (toolId) => TOOL_ICON_MAP[toolId] || null

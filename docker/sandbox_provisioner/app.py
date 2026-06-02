@@ -682,6 +682,29 @@ class KubernetesProvisionerBackend:
             return all(actual_mounts.get(path) == sub_path for path, sub_path in expected_mounts.items())
         return False
 
+    def _discovered_matches_request(
+        self,
+        sandbox_id: str,
+        *,
+        uid: str,
+        file_thread_id: str,
+        skills_thread_id: str,
+    ) -> bool:
+        pod_name = self._pod_name(sandbox_id)
+        try:
+            pod = self._core_api.read_namespaced_pod(name=pod_name, namespace=self._namespace)
+        except Exception:
+            return False
+
+        annotations = pod.metadata.annotations or {}
+        if str(annotations.get("uid") or "").strip() != uid:
+            return False
+        if str(annotations.get("file-thread-id") or annotations.get("thread-id") or "").strip() != file_thread_id:
+            return False
+        if str(annotations.get("skills-thread-id") or annotations.get("thread-id") or "").strip() != skills_thread_id:
+            return False
+        return self._pod_has_expected_mounts(pod, file_thread_id=file_thread_id, skills_thread_id=skills_thread_id, uid=uid)
+
     def create(
         self,
         sandbox_id: str,
@@ -701,7 +724,15 @@ class KubernetesProvisionerBackend:
             safe_uid = LocalContainerProvisionerBackend._validate_uid(uid)
             discovered = self.discover(sandbox_id)
             if discovered is not None:
-                return discovered
+                if self._discovered_matches_request(
+                    sandbox_id,
+                    uid=safe_uid,
+                    file_thread_id=safe_file_thread_id,
+                    skills_thread_id=safe_skills_thread_id,
+                ):
+                    return discovered
+                logger.info("Deleting sandbox %s with mismatched requested identity", sandbox_id)
+                self.delete(sandbox_id)
 
             self._pod_name(sandbox_id)
             self._service_name(sandbox_id)

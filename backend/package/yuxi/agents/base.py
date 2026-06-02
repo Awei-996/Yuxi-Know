@@ -13,7 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from yuxi import config as sys_config
 from yuxi.agents.context import BaseContext, resolve_agent_resource_options
-from yuxi.agents.subagent_thread import make_child_thread_id
+from yuxi.utils.subagent_thread_utils import make_child_thread_id
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils import logger
 
@@ -28,6 +28,20 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return _json_safe(value.model_dump())
     return str(value)
+
+
+def _metadata_thread_id(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("thread_id", "subagent_thread_id"):
+        thread_id = value.get(key)
+        if isinstance(thread_id, str) and thread_id.strip():
+            return thread_id.strip()
+    for key in ("metadata", "configurable", "config"):
+        thread_id = _metadata_thread_id(value.get(key))
+        if thread_id:
+            return thread_id
+    return None
 
 
 def _subagent_route_for_namespace(
@@ -55,9 +69,14 @@ async def _collect_subagent_routes(
             tool_call_id = (
                 cause.get("tool_call_id") if isinstance(cause, dict) else getattr(subagent, "trigger_call_id", None)
             )
-            if path and isinstance(subagent_type, str) and isinstance(tool_call_id, str) and tool_call_id:
+            state = getattr(subagent, "state", None)
+            metadata = getattr(subagent, "metadata", None)
+            thread_id = _metadata_thread_id(metadata) or _metadata_thread_id(state)
+            if not thread_id and isinstance(subagent_type, str) and isinstance(tool_call_id, str) and tool_call_id:
+                thread_id = make_child_thread_id(parent_thread_id, subagent_type, tool_call_id)
+            if path and isinstance(subagent_type, str) and isinstance(tool_call_id, str) and tool_call_id and thread_id:
                 routes[path] = {
-                    "thread_id": make_child_thread_id(parent_thread_id, subagent_type, tool_call_id),
+                    "thread_id": thread_id,
                     "parent_thread_id": parent_thread_id,
                     "subagent_type": subagent_type,
                     "tool_call_id": tool_call_id,
@@ -199,17 +218,19 @@ class BaseAgent:
                 method = event.get("method")
                 data = params.get("data")
                 subagent_route = _subagent_route_for_namespace(subagent_routes, namespace)
-                if namespace and subagent_route is None:
-                    await asyncio.sleep(0)
-                    subagent_route = _subagent_route_for_namespace(subagent_routes, namespace)
 
                 if method == "messages":
                     msg, metadata = data
                     metadata = dict(metadata or {})
+                    actual_thread_id = (
+                        _metadata_thread_id(metadata) or _metadata_thread_id(params) or _metadata_thread_id(data)
+                    )
                     metadata["namespace"] = namespace
                     metadata["stream_event"] = {"method": method, "namespace": namespace}
                     if subagent_route:
                         metadata.update(subagent_route)
+                    if actual_thread_id:
+                        metadata["thread_id"] = actual_thread_id
                     yield "messages", (msg, metadata)
                 elif method == "values" and not namespace:
                     yield "values", data
@@ -219,8 +240,11 @@ class BaseAgent:
                         "namespace": namespace,
                         "data": _json_safe(data),
                     }
+                    actual_thread_id = _metadata_thread_id(params) or _metadata_thread_id(data)
                     if subagent_route:
                         event_payload.update(subagent_route)
+                    if actual_thread_id:
+                        event_payload["thread_id"] = actual_thread_id
                     yield "stream_event", event_payload
         finally:
             route_task.cancel()

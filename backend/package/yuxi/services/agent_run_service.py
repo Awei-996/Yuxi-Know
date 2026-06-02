@@ -310,6 +310,7 @@ async def get_active_run_by_thread(*, thread_id: str, current_uid: str, db: Asyn
         .where(
             AgentRun.thread_id == thread_id,
             AgentRun.uid == str(current_uid),
+            AgentRun.run_type.in_(["chat", "resume"]),
             AgentRun.status.in_(["pending", "running", "cancel_requested"]),
         )
         .order_by(AgentRun.created_at.desc())
@@ -322,6 +323,7 @@ async def get_active_run_by_thread(*, thread_id: str, current_uid: str, db: Asyn
             .where(
                 AgentRun.thread_id == thread_id,
                 AgentRun.uid == str(current_uid),
+                AgentRun.run_type.in_(["chat", "resume"]),
                 AgentRun.status == "interrupted",
             )
             .order_by(AgentRun.created_at.desc())

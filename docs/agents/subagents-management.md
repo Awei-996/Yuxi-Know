@@ -71,15 +71,18 @@ Yuxi 的子智能体是 Agent-backed 形态：它仍然是 `agents` 表中的一
 class TaskToolSchema(BaseModel):
     description: str
     subagent_type: str
+    thread_id: str | None = None
 ```
+
+`thread_id` 是可选的子智能体线程 ID。新任务不需要填写；如果要继续之前同一个子智能体任务，应使用上一次 `task` 工具结果中的 `子智能体线程 ID`。
 
 执行时的关键流程：
 
 1. 从父 Agent 的 `context.subagents` 读取允许的子智能体 slug。
 2. 使用 `AgentRepository` 加载当前用户可见且 `is_subagent=true` 的 Agent。
-3. 为本次调用生成 child checkpoint thread id，例如 `<parent_thread_id>_sub_<slug>_<uuid8>`。
+3. 新任务会为本次调用生成 child checkpoint thread id，例如 `<parent_thread_id>_sub_<slug>_<uuid8>`；续跑任务会校验并复用传入的 `thread_id`。
 4. 使用子智能体自己的 `SubAgentContext` 和 `config_json.context` 构建真实 Agent graph。
-5. 调用结束后，只把子智能体最终 assistant 文本作为 `task` 工具结果返回给主 Agent。
+5. 调用结束后，把子智能体线程 ID 和最终 assistant 文本作为 `task` 工具结果返回给主 Agent。
 
 `SubAgentBackend` 复用普通 Agent 的运行时资源归一化流程，但不会挂载 task middleware；它的 `subagents` 字段隐藏且默认为空，因此不会形成嵌套子智能体调用。
 

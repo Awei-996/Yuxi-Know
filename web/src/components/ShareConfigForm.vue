@@ -501,8 +501,8 @@ defineExpose({
       border-color: var(--main-color);
       background: linear-gradient(180deg, var(--main-10) 0%, var(--gray-0) 100%);
       box-shadow:
-        0 0 0 1px var(--main-20),
-        0 10px 24px rgb(0 0 0 / 6%);
+        0 0 0 1px var(--main-10),
+        0 5px 12px rgb(0 0 0 / 6%);
     }
   }
 
@@ -549,7 +549,7 @@ defineExpose({
 
   .share-mode-card.active .card-icon-wrapper {
     background: var(--main-0);
-    box-shadow: inset 0 0 0 1px var(--main-20);
+    box-shadow: inset 0 0 0 1px var(--main-10);
   }
 
   .share-mode-card.active .card-icon {

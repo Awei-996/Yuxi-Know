@@ -3,9 +3,6 @@
     <template #header>
       <div class="sep-header">
         <span class="note">{{ subagentDisplayName }}</span>
-        <span v-if="subagentSlug && subagentSlug !== subagentDisplayName" class="subagent-slug">
-          {{ subagentSlug }}
-        </span>
         <span v-if="runStatusLabel" class="run-status" :class="runStatusClass">
           {{ runStatusLabel }}
         </span>
@@ -16,6 +13,9 @@
 
     <template #params>
       <div v-if="description" class="task-description">{{ description }}</div>
+      <div v-if="childThreadId" class="task-thread-id">
+        子智能体线程 ID：{{ childThreadId }}
+      </div>
     </template>
 
     <template #result="{ resultContent }">
@@ -50,26 +50,28 @@ const parsedArgs = computed(() => {
 })
 
 const subagentRun = computed(() => props.toolCall.subagent_run || null)
-const subagentSlug = computed(
-  () => parsedArgs.value.subagent_type || subagentRun.value?.subagent_type || ''
-)
 const subagentDisplayName = computed(
-  () =>
-    subagentRun.value?.subagent_name ||
-    parsedArgs.value.subagent_name ||
-    subagentSlug.value ||
-    'Unknown Agent'
+  () => subagentRun.value?.subagent_name || props.toolCall.display_label || '子智能体'
 )
 const description = computed(
   () => parsedArgs.value.description || subagentRun.value?.description || ''
 )
-const runStatus = computed(() => subagentRun.value?.status || '')
+const childThreadId = computed(() => subagentRun.value?.child_thread_id || parsedArgs.value.thread_id || '')
+const hasToolResult = computed(() => Boolean(props.toolCall.tool_call_result || props.toolCall.result))
+const runStatus = computed(() => {
+  if (props.toolCall.status === 'error') return 'failed'
+  if (props.toolCall.status !== 'success' && !hasToolResult.value) return 'running'
+  if (subagentRun.value?.status) return subagentRun.value.status
+  return 'completed'
+})
 const runStatusLabel = computed(() => {
   if (runStatus.value === 'completed') return '已完成'
   if (runStatus.value === 'failed') return '失败'
+  if (runStatus.value === 'running') return '运行中'
   return ''
 })
 const runStatusClass = computed(() => ({
+  'is-running': runStatus.value === 'running',
   'is-completed': runStatus.value === 'completed',
   'is-failed': runStatus.value === 'failed'
 }))
@@ -90,14 +92,6 @@ const shortDescription = computed(() => {
   overflow: hidden;
 }
 
-.subagent-slug {
-  color: var(--gray-500);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .run-status {
   flex-shrink: 0;
   border-radius: 4px;
@@ -105,6 +99,11 @@ const shortDescription = computed(() => {
   font-size: 11px;
   background: var(--gray-25);
   color: var(--gray-600);
+
+  &.is-running {
+    color: var(--color-primary-700);
+    background: var(--color-primary-50);
+  }
 
   &.is-completed {
     color: var(--color-success-700);
@@ -123,6 +122,13 @@ const shortDescription = computed(() => {
   color: var(--gray-800);
   padding: 6px 8px;
   background: var(--gray-50);
+}
+
+.task-thread-id {
+  margin-top: 6px;
+  color: var(--gray-500);
+  font-size: 12px;
+  word-break: break-all;
 }
 
 .task-result {

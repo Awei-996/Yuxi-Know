@@ -8,12 +8,11 @@ from typing import Any
 from langchain.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.types import Command
 from yuxi import config as conf
-from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agents_prompt_file
 from yuxi.agents.buildin import agent_manager
-from yuxi.agents.context import normalize_agent_context_config
+from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
 from yuxi.agents.state import AgentStatePayload
-from yuxi.agents.subagent_thread import parse_child_thread_id
 from yuxi.repositories.agent_repository import AgentRepository
+from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services.conversation_service import serialize_attachment
 from yuxi.services.langfuse_service import (
@@ -29,44 +28,6 @@ from yuxi.utils.logging_config import logger
 from yuxi.utils.question_utils import (
     normalize_questions as _normalize_interrupt_questions,
 )
-
-WORKSPACE_AGENTS_PROMPT_MAX_BYTES = 64 * 1024
-
-
-def _load_workspace_agents_prompt(thread_id: str, uid: str) -> str:
-    prompt_file = sandbox_workspace_agents_prompt_file(thread_id, uid)
-    try:
-        with prompt_file.open("rb") as buffer:
-            content = buffer.read(WORKSPACE_AGENTS_PROMPT_MAX_BYTES + 1)
-    except FileNotFoundError:
-        return ""
-    except IsADirectoryError:
-        logger.warning("读取工作区 AGENTS.md 失败: 路径是目录")
-        return ""
-    except OSError as exc:
-        logger.warning(f"读取工作区 AGENTS.md 失败: {exc}")
-        return ""
-
-    prompt = content[:WORKSPACE_AGENTS_PROMPT_MAX_BYTES].decode("utf-8", errors="replace").strip()
-    if not prompt:
-        return ""
-    if len(content) > WORKSPACE_AGENTS_PROMPT_MAX_BYTES:
-        return f"{prompt}\n\n[AGENTS.md 内容已截断]"
-    return prompt
-
-
-async def _build_agent_input_context(agent_config: dict, *, thread_id: str, uid: str) -> dict:
-    input_context = dict(agent_config or {})
-    agents_prompt = await asyncio.to_thread(_load_workspace_agents_prompt, thread_id, uid)
-
-    if agents_prompt:
-        agents_section = f"用户工作区 agents/AGENTS.md 内容：\n{agents_prompt}"
-        base_prompt = str(input_context.get("system_prompt") or "").rstrip()
-        input_context["system_prompt"] = f"{base_prompt}\n\n{agents_section}" if base_prompt else agents_section
-
-    input_context.update({"uid": uid, "thread_id": thread_id})
-    return input_context
-
 
 def _build_state_files(attachments: list[dict]) -> dict:
     """将附件列表转换为 StateBackend 格式的 files 字典
@@ -786,7 +747,13 @@ async def agent_chat(
     )
 
     messages = [human_message]
-    input_context = await _build_agent_input_context(agent_config, thread_id=thread_id, uid=uid)
+    input_context = await build_agent_input_context(
+        agent_config,
+        thread_id=thread_id,
+        uid=uid,
+        run_id=meta.get("run_id"),
+        request_id=meta.get("request_id"),
+    )
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -986,7 +953,13 @@ async def stream_agent_chat(
     )
 
     messages = [human_message]
-    input_context = await _build_agent_input_context(agent_config, thread_id=thread_id, uid=uid)
+    input_context = await build_agent_input_context(
+        agent_config,
+        thread_id=thread_id,
+        uid=uid,
+        run_id=meta.get("run_id"),
+        request_id=meta.get("request_id"),
+    )
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -1140,7 +1113,9 @@ async def stream_agent_chat(
             yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
             return
 
+        interrupted = False
         async for chunk in check_and_handle_interrupts(agent, langgraph_config, make_chunk, meta, thread_id):
+            interrupted = True
             yield chunk
 
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
@@ -1168,6 +1143,9 @@ async def stream_agent_chat(
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
+
+        if interrupted:
+            return
 
         yield make_chunk(status="finished", meta=meta)
 
@@ -1261,8 +1239,15 @@ async def stream_agent_resume(
 
     meta["agent_id"] = agent_item.slug
     meta["backend_id"] = agent_item.backend_id
+    input_context = await build_agent_input_context(
+        agent_config or {},
+        thread_id=thread_id,
+        uid=uid,
+        run_id=meta.get("run_id"),
+        request_id=meta.get("request_id"),
+    )
     context = agent.context_schema()
-    context.update(await _build_agent_input_context(agent_config or {}, thread_id=thread_id, uid=uid))
+    context.update(input_context)
     langfuse_run = _build_langfuse_run_context(
         current_user=current_user,
         thread_id=thread_id,
@@ -1277,7 +1262,7 @@ async def stream_agent_resume(
 
     stream_source = agent.stream_resume_with_state(
         resume_command,
-        input_context=agent_config or {},
+        input_context=input_context,
         callbacks=langfuse_run.callbacks,
         metadata=langfuse_run.metadata,
         tags=langfuse_run.tags,
@@ -1338,7 +1323,9 @@ async def stream_agent_resume(
                 )
 
         langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
+        interrupted = False
         async for chunk in check_and_handle_interrupts(agent, langgraph_config, make_resume_chunk, meta, thread_id):
+            interrupted = True
             yield chunk
 
         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
@@ -1367,6 +1354,9 @@ async def stream_agent_resume(
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
             yield make_resume_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
+
+        if interrupted:
+            return
 
         yield make_resume_chunk(status="finished", meta=meta)
 
@@ -1424,6 +1414,24 @@ async def _read_checkpoint_state(agent, *, uid: str, thread_id: str):
     return await graph.aget_state(langgraph_config)
 
 
+def _serialize_subagent_run(run) -> dict[str, Any]:
+    payload = run.input_payload if isinstance(run.input_payload, dict) else {}
+    return {
+        "id": payload.get("tool_call_id") or run.id,
+        "run_id": run.id,
+        "subagent_type": payload.get("subagent_type") or run.agent_id,
+        "subagent_name": payload.get("subagent_name"),
+        "child_thread_id": payload.get("child_thread_id") or run.thread_id,
+        "description": payload.get("description"),
+        "status": run.status,
+        "created_at": run.to_dict().get("created_at"),
+        "completed_at": run.to_dict().get("finished_at"),
+        "result_preview": payload.get("result_preview"),
+        "error": run.error_message,
+        "parent_agent_run_id": run.parent_agent_run_id,
+    }
+
+
 async def get_agent_state_view(
     *,
     thread_id: str,
@@ -1453,53 +1461,38 @@ async def get_agent_state_view(
             response["messages"] = _serialize_state_messages(values)
         return response
 
-    child_thread = parse_child_thread_id(thread_id)
-    if not child_thread:
+    run_repo = AgentRunRepository(db)
+    subagent_run = await run_repo.get_latest_subagent_run_by_thread_for_user(thread_id, str(current_uid))
+    if not subagent_run or not subagent_run.parent_agent_run_id:
         raise HTTPException(status_code=404, detail="对话线程不存在")
 
-    parent_thread_id = child_thread.parent_thread_id
-    parent_conversation = await conv_repo.get_conversation_by_thread_id(parent_thread_id)
+    parent_run = await run_repo.get_run_for_user(subagent_run.parent_agent_run_id, str(current_uid))
+    if not parent_run:
+        raise HTTPException(status_code=404, detail="对话线程不存在")
+
+    parent_conversation = await conv_repo.get_conversation_by_thread_id(parent_run.thread_id)
     if (
         not parent_conversation
+        or parent_conversation.id != parent_run.conversation_id
         or parent_conversation.uid != str(current_uid)
         or parent_conversation.status == "deleted"
     ):
         raise HTTPException(status_code=404, detail="对话线程不存在")
 
-    parent_agent_item = await agent_repo.get_by_slug(parent_conversation.agent_id)
-    if not parent_agent_item:
-        raise HTTPException(status_code=404, detail="智能体不存在")
-    parent_agent = agent_manager.get_agent(parent_agent_item.backend_id)
-    if not parent_agent:
-        raise HTTPException(status_code=404, detail="智能体后端不存在")
-
-    parent_state = await _read_checkpoint_state(parent_agent, uid=str(current_uid), thread_id=parent_thread_id)
-    parent_values = getattr(parent_state, "values", {}) if parent_state else {}
-    parent_agent_state = extract_agent_state(parent_values)
-    subagent_run = next(
-        (
-            run
-            for run in parent_agent_state.get("subagent_runs", [])
-            if isinstance(run, dict) and run.get("child_thread_id") == thread_id
-        ),
-        None,
-    )
-    if not subagent_run:
-        raise HTTPException(status_code=404, detail="对话线程不存在")
-
-    child_agent_item = await agent_repo.get_by_slug(str(subagent_run.get("subagent_type") or ""))
+    child_agent_item = await agent_repo.get_by_slug(subagent_run.agent_id)
     if not child_agent_item:
         raise HTTPException(status_code=404, detail="智能体不存在")
     child_agent = agent_manager.get_agent(child_agent_item.backend_id)
     if not child_agent:
         raise HTTPException(status_code=404, detail="智能体后端不存在")
 
-    child_state = await _read_checkpoint_state(child_agent, uid=str(current_uid), thread_id=thread_id)
+    checkpoint_thread_id = subagent_run.checkpoint_thread_id or subagent_run.thread_id
+    child_state = await _read_checkpoint_state(child_agent, uid=str(current_uid), thread_id=checkpoint_thread_id)
     child_values = getattr(child_state, "values", {}) if child_state else {}
     response = {
         "agent_state": extract_agent_state(child_values),
-        "parent_thread_id": parent_thread_id,
-        "subagent_run": subagent_run,
+        "parent_thread_id": parent_run.thread_id,
+        "subagent_run": _serialize_subagent_run(subagent_run),
     }
     if include_messages:
         response["messages"] = _serialize_state_messages(child_values)

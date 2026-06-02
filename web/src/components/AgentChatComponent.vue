@@ -193,7 +193,18 @@
           <div v-if="sideActive === 'state'" class="state-panel">
             <div class="side-panel__header state-panel-header">
               <span class="state-panel-title">状态</span>
-              <span class="state-panel-summary">{{ stateSummaryLabel }}</span>
+              <div class="state-panel-header-actions">
+                <span class="state-panel-summary">{{ stateSummaryLabel }}</span>
+                <button
+                  type="button"
+                  class="state-refresh-btn"
+                  title="刷新状态"
+                  :disabled="isRefreshingState"
+                  @click.stop="handleAgentStateRefresh()"
+                >
+                  <RefreshCw :size="14" :class="{ 'is-spinning': isRefreshingState }" />
+                </button>
+              </div>
             </div>
 
             <div class="state-panel-body">
@@ -286,16 +297,27 @@
                     class="state-list-item"
                   >
                     <img
+                      v-if="getSubagentIconSrc(run)"
                       class="state-subagent-icon"
                       :src="getSubagentIconSrc(run)"
                       :alt="`${getSubagentRunName(run)}图标`"
                     />
+                    <span v-else class="state-subagent-icon" aria-hidden="true"></span>
                     <div class="state-list-item-body">
                       <div class="state-list-item-title state-subagent-title">
                         <span>{{ getSubagentRunName(run) }}</span>
                         <CheckCircleOutlined
                           v-if="run.status === 'completed'"
-                          class="state-subagent-completed-icon"
+                          class="state-subagent-status-icon state-subagent-completed-icon"
+                        />
+                        <CloseCircleOutlined
+                          v-else-if="run.status === 'failed'"
+                          class="state-subagent-status-icon state-subagent-failed-icon"
+                        />
+                        <SyncOutlined
+                          v-else-if="run.status === 'running'"
+                          spin
+                          class="state-subagent-status-icon state-subagent-running-icon"
                         />
                       </div>
                       <div class="state-list-item-meta">
@@ -327,7 +349,7 @@ import {
   onDeactivated
 } from 'vue'
 import { message } from 'ant-design-vue'
-import { SquareCheck } from 'lucide-vue-next'
+import { RefreshCw, SquareCheck } from 'lucide-vue-next'
 import { getFileIcon, getFileIconColor, formatFileSize } from '@/utils/file_utils'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import {
@@ -361,7 +383,7 @@ import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import AttachmentTmpUploadModal from '@/components/AttachmentTmpUploadModal.vue'
-import { normalizeToolCalls } from '@/components/ToolCallingResult/toolRegistry'
+import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
 // ==================== PROPS & EMITS ====================
 const props = defineProps({
@@ -422,6 +444,7 @@ const threadMessages = ref({})
 const threadFilesMap = ref({})
 const threadAttachmentsMap = ref({})
 const attachmentUploadModalOpen = ref(false)
+const isRefreshingState = ref(false)
 const threadConfigNoticeMap = ref({})
 const threadPendingConfigNoticeMap = ref({})
 const threadConfigSnapshotMap = ref({})
@@ -501,7 +524,10 @@ const getArtifactMetaLabel = (path) => {
   return extension ? `交付文件 · ${extension.toUpperCase()}` : '交付文件'
 }
 
-const getSubagentRunName = (run) => run?.subagent_name || run?.subagent_type || '子智能体'
+const getSubagentRunName = (run) => {
+  const subagentType = run?.subagent_type ? String(run.subagent_type) : ''
+  return run?.subagent_name || currentSubagentOptionBySlug.value.get(subagentType)?.name || '子智能体'
+}
 
 const getSubagentAgent = (run) => {
   const subagentId = run?.subagent_type
@@ -511,7 +537,7 @@ const getSubagentAgent = (run) => {
 
 const getSubagentIconSrc = (run) => {
   const agent = getSubagentAgent(run)
-  return agent?.icon || generatePixelAvatar(run?.subagent_type || run?.id || getSubagentRunName(run))
+  return agent?.icon || (run?.subagent_type ? generatePixelAvatar(run.subagent_type) : '')
 }
 
 const getSubagentRunMeta = (run) => {
@@ -688,6 +714,20 @@ const currentSubagentRunById = computed(() => {
   })
   return runById
 })
+const currentSubagentRunByThreadId = computed(() => {
+  const runByThreadId = new Map()
+  currentSubagentRuns.value.forEach((run) => {
+    if (run?.child_thread_id) runByThreadId.set(String(run.child_thread_id), run)
+  })
+  return runByThreadId
+})
+const currentSubagentOptionBySlug = computed(() => {
+  const optionBySlug = new Map()
+  mentionConfig.value.subagents.forEach((subagent) => {
+    if (subagent?.slug) optionBySlug.set(String(subagent.slug), subagent)
+  })
+  return optionBySlug
+})
 const currentStateFiles = computed(() => {
   const files = []
   const seenPaths = new Set()
@@ -748,19 +788,16 @@ const currentThreadConfigNotice = computed(() => {
   return threadConfigNoticeMap.value[currentChatId.value] || null
 })
 
+const shouldSuppressRefsForApproval = () =>
+  approvalState.showModal ||
+  Boolean(
+    approvalState.threadId && chatState.currentThreadId === approvalState.threadId && isProcessing.value
+  )
+
 // 计算是否显示Refs组件的条件
 const shouldShowRefs = computed(() => {
   return (conv) => {
-    return (
-      getLastMessage(conv) &&
-      conv.status !== 'streaming' &&
-      !approvalState.showModal &&
-      !(
-        approvalState.threadId &&
-        chatState.currentThreadId === approvalState.threadId &&
-        isProcessing.value
-      )
-    )
+    return getLastMessage(conv) && conv.status !== 'streaming' && !shouldSuppressRefsForApproval()
   }
 })
 
@@ -1693,10 +1730,15 @@ const handleAgentStateRefresh = async (threadId = null) => {
   if (!currentAgentId.value) return
   const chatId = threadId || currentChatId.value
   if (!chatId) return
-  await Promise.all([
-    fetchAgentState(currentAgentId.value, chatId),
-    refreshThreadFilesAndAttachments(chatId)
-  ])
+  isRefreshingState.value = true
+  try {
+    await Promise.all([
+      fetchAgentState(currentAgentId.value, chatId),
+      refreshThreadFilesAndAttachments(chatId)
+    ])
+  } finally {
+    isRefreshingState.value = false
+  }
 }
 
 const toggleStatePanel = async () => {
@@ -1780,17 +1822,10 @@ const hasVisibleAssistantBody = (message) => {
 }
 
 const getMessageToolCalls = (message) => {
-  return normalizeToolCalls(message?.tool_calls, {
-    mapToolCall: (toolCall) => {
-      const subagentRun = toolCall.id ? currentSubagentRunById.value.get(String(toolCall.id)) : null
-      if (!subagentRun) return toolCall
-
-      return {
-        ...toolCall,
-        subagent_run: subagentRun,
-        display_label: subagentRun.subagent_name || subagentRun.subagent_type || undefined
-      }
-    }
+  return enrichTaskToolCalls(message?.tool_calls, {
+    subagentRunById: currentSubagentRunById.value,
+    subagentRunByThreadId: currentSubagentRunByThreadId.value,
+    subagentOptionBySlug: currentSubagentOptionBySlug.value
   })
 }
 
@@ -1871,19 +1906,7 @@ const getLastMessage = (conv) => {
 }
 
 const showMsgRefs = (msg) => {
-  // 如果正在审批中，不显示 refs
-  if (approvalState.showModal) {
-    return false
-  }
-
-  // 如果当前线程ID与审批线程ID匹配，但审批框已关闭（说明刚刚处理完审批）
-  // 且当前有新的流式处理正在进行，则不显示之前被中断的消息的 refs
-  if (
-    approvalState.threadId &&
-    chatState.currentThreadId === approvalState.threadId &&
-    !approvalState.showModal &&
-    isProcessing
-  ) {
+  if (shouldSuppressRefsForApproval()) {
     return false
   }
 
@@ -2615,6 +2638,40 @@ watch(currentChatId, (threadId, oldThreadId) => {
   padding: 10px 14px;
 }
 
+.state-panel-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  color: var(--gray-500);
+  background: transparent;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    color: var(--main-700);
+    background: var(--gray-100);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .is-spinning {
+    animation: spin 1s linear infinite;
+  }
+}
+
 .state-panel-title {
   min-width: 0;
   font-size: 15px;
@@ -2807,10 +2864,21 @@ watch(currentChatId, (threadId, oldThreadId) => {
   white-space: nowrap;
 }
 
-.state-subagent-completed-icon {
+.state-subagent-status-icon {
   flex-shrink: 0;
-  color: var(--color-success-700);
   font-size: 13px;
+}
+
+.state-subagent-completed-icon {
+  color: var(--color-success-700);
+}
+
+.state-subagent-failed-icon {
+  color: var(--color-error-700);
+}
+
+.state-subagent-running-icon {
+  color: var(--color-info-700);
 }
 
 .hide-text {

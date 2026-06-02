@@ -241,8 +241,12 @@ async def test_stream_agent_resume_routes_subagent_chunks(monkeypatch):
         return {"thread_id": "parent-thread", "uid": "user-1"}
 
     monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
-    monkeypatch.setattr(svc, "_build_agent_input_context", fake_build_agent_input_context)
-    monkeypatch.setattr(svc, "_build_langfuse_run_context", lambda **_kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[]))
+    monkeypatch.setattr(svc, "build_agent_input_context", fake_build_agent_input_context)
+    monkeypatch.setattr(
+        svc,
+        "_build_langfuse_run_context",
+        lambda **_kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[]),
+    )
     monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_check_and_handle_interrupts)
     monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
     monkeypatch.setattr(svc, "ConversationRepository", lambda _db: object())
