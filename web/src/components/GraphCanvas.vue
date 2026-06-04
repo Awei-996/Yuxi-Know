@@ -8,17 +8,47 @@
       <div class="canvas-content">
         <slot name="content" />
       </div>
-      <!-- Statistical Info Panel -->
-      <div class="graph-stats-panel" v-if="graphData.nodes.length > 0">
-        <div class="stat-item">
-          <span class="stat-label">节点</span>
-          <span class="stat-value">{{ graphData.nodes.length }}</span>
-          <span v-if="graphInfo?.node_count" class="stat-total">/ {{ graphInfo.node_count }}</span>
+      <div class="graph-stats-wrapper" v-if="graphData.nodes.length > 0">
+        <div v-if="activeStatsPanel" class="floating-panel type-stats-card">
+          <div class="panel-header">
+            <span class="panel-title">
+              {{ activeStatsPanel === 'node' ? '实体类型' : '关系类型' }}
+            </span>
+          </div>
+          <div class="panel-body">
+            <div class="type-stats-list">
+              <div
+                v-for="item in activeTypeStats"
+                :key="item.name"
+                class="type-stats-row"
+                :title="`${item.name}: ${item.count}`"
+              >
+                <span class="type-color" :style="{ backgroundColor: item.color }"></span>
+                <span class="type-name">{{ item.name }}</span>
+                <span class="type-count">{{ item.count }}</span>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="stat-item">
-          <span class="stat-label">边</span>
-          <span class="stat-value">{{ graphData.edges.length }}</span>
-          <span v-if="graphInfo?.edge_count" class="stat-total">/ {{ graphInfo.edge_count }}</span>
+        <div class="floating-panel graph-stats-panel">
+          <button
+            class="stat-item"
+            :class="{ active: activeStatsPanel === 'node' }"
+            type="button"
+            @click="toggleStatsPanel('node')"
+          >
+            <span class="stat-label">实体</span>
+            <span class="stat-value">{{ visibleEntityCount }}</span>
+          </button>
+          <button
+            class="stat-item"
+            :class="{ active: activeStatsPanel === 'edge' }"
+            type="button"
+            @click="toggleStatsPanel('edge')"
+          >
+            <span class="stat-label">关系</span>
+            <span class="stat-value">{{ visibleRelationshipCount }}</span>
+          </button>
         </div>
       </div>
       <div v-if="$slots.bottom" class="overlay bottom">
@@ -30,7 +60,7 @@
 
 <script setup>
 import { Graph } from '@antv/g6'
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 
 const props = defineProps({
@@ -59,6 +89,7 @@ const emit = defineEmits(['ready', 'data-rendered', 'node-click', 'edge-click', 
 const container = ref(null)
 const rootEl = ref(null)
 const themeStore = useThemeStore()
+const activeStatsPanel = ref('')
 let graphInstance = null
 let resizeObserver = null
 let renderTimeout = null
@@ -84,9 +115,109 @@ const defaultLayout = {
   collide: { radius: 40, strength: 0.8, iterations: 3 }
 }
 
+const CHUNK_NODE_LABEL = 'Chunk'
+const CHUNK_NODE_COLOR = '#8c8c8c'
+const CHUNK_MENTION_EDGE_LABEL = 'MENTIONS'
+const NODE_LABEL_COLORS = [
+  '#3996ae',
+  '#5ad8a6',
+  '#f6bd16',
+  '#f27c7c',
+  '#9581cc',
+  '#6dc8ec',
+  '#ff9d4d',
+  '#92d050',
+  '#e885ba'
+]
+const EDGE_LABEL_COLORS = [
+  '#99add1',
+  '#3996ae',
+  '#13c2c2',
+  '#faad14',
+  '#f27c7c',
+  '#9581cc',
+  '#52c41a',
+  '#ff9d4d'
+]
+
 // CSS 变量解析工具函数
 function getCSSVariable(variableName, element = document.documentElement) {
   return getComputedStyle(element).getPropertyValue(variableName).trim()
+}
+
+function hashString(value) {
+  let hash = 0
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash << 5) - hash + value.charCodeAt(i)
+    hash |= 0
+  }
+  return Math.abs(hash)
+}
+
+function getPaletteColor(label, colors) {
+  return colors[hashString(label) % colors.length]
+}
+
+function getNodeVisualLabel(node) {
+  return node?.type || node?.normalized?.type || node?.properties?.label || 'Entity'
+}
+
+function getNodeColor(node) {
+  const label = getNodeVisualLabel(node)
+  if (label === CHUNK_NODE_LABEL) return CHUNK_NODE_COLOR
+  return getPaletteColor(label, NODE_LABEL_COLORS)
+}
+
+function getEdgeVisualLabel(edge) {
+  return edge?.type || edge?.normalized?.type || 'RELATED_TO'
+}
+
+function getEdgeColor(edge) {
+  return getPaletteColor(getEdgeVisualLabel(edge), EDGE_LABEL_COLORS)
+}
+
+function isEntityNode(node) {
+  return getNodeVisualLabel(node) !== CHUNK_NODE_LABEL
+}
+
+function isEntityRelationEdge(edge) {
+  return getEdgeVisualLabel(edge) !== CHUNK_MENTION_EDGE_LABEL
+}
+
+function buildTypeStats(items, getName, getColor) {
+  const counts = new Map()
+  for (const item of items || []) {
+    const name = getName(item)
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  return Array.from(counts, ([name, count]) => ({
+    name,
+    count,
+    color: getColor({ type: name, normalized: { type: name } })
+  })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+}
+
+const visibleEntityNodes = computed(() => (props.graphData?.nodes || []).filter(isEntityNode))
+
+const visibleRelationshipEdges = computed(() =>
+  (props.graphData?.edges || []).filter(isEntityRelationEdge)
+)
+
+const visibleEntityCount = computed(() => visibleEntityNodes.value.length)
+const visibleRelationshipCount = computed(() => visibleRelationshipEdges.value.length)
+
+const nodeTypeStats = computed(() => buildTypeStats(visibleEntityNodes.value, getNodeVisualLabel, getNodeColor))
+
+const edgeTypeStats = computed(() =>
+  buildTypeStats(visibleRelationshipEdges.value, getEdgeVisualLabel, getEdgeColor)
+)
+
+const activeTypeStats = computed(() =>
+  activeStatsPanel.value === 'node' ? nodeTypeStats.value : edgeTypeStats.value
+)
+
+function toggleStatsPanel(type) {
+  activeStatsPanel.value = activeStatsPanel.value === type ? '' : type
 }
 
 function formatData() {
@@ -107,6 +238,8 @@ function formatData() {
     id: String(n.id),
     data: {
       label: n[props.labelField] ?? n.name ?? String(n.id),
+      visualLabel: getNodeVisualLabel(n),
+      color: getNodeColor(n),
       degree: degrees.get(String(n.id)) || 0,
       original: n // 保存原始数据
     }
@@ -118,6 +251,8 @@ function formatData() {
     target: String(e.target_id),
     data: {
       label: e.type ?? '',
+      visualLabel: getEdgeVisualLabel(e),
+      color: getEdgeColor(e),
       original: e // 保存原始数据
     }
   }))
@@ -171,6 +306,7 @@ function initGraph() {
           const deg = d.data.degree || 0
           return Math.min(15 + deg * 5, 50)
         },
+        fill: (d) => d.data.color,
         opacity: 0.9,
         stroke: getCSSVariable('--color-bg-container'),
         lineWidth: 1.5,
@@ -178,21 +314,7 @@ function initGraph() {
         shadowBlur: 4,
         ...(props.nodeStyleOptions.style || {})
       },
-      palette: props.nodeStyleOptions.palette || {
-        field: 'label',
-        color: [
-          '#60a5fa',
-          '#34d399',
-          '#f59e0b',
-          '#f472b6',
-          '#22d3ee',
-          '#a78bfa',
-          '#f97316',
-          '#4ade80',
-          '#f43f5e',
-          '#2dd4bf'
-        ]
-      }
+      palette: props.nodeStyleOptions.palette
     },
     edge: {
       type: 'quadratic',
@@ -201,12 +323,13 @@ function initGraph() {
         labelFill: getCSSVariable('--gray-800'),
         labelBackground: true,
         labelBackgroundFill: getCSSVariable('--gray-100'),
-        stroke: getCSSVariable('--gray-400'),
+        stroke: (d) => d.data.color,
         opacity: 0.8,
         lineWidth: 1.2,
         endArrow: true,
         ...(props.edgeStyleOptions.style || {})
-      }
+      },
+      palette: props.edgeStyleOptions.palette
     },
     behaviors: [
       'drag-element',
@@ -516,27 +639,71 @@ defineExpose({
     height: 100%;
   }
 
-  .graph-stats-panel {
+  .graph-stats-wrapper {
     position: absolute;
-    bottom: 20px;
-    left: 20px;
+    bottom: 10px;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    pointer-events: auto;
+    z-index: 10;
+  }
+
+  .floating-panel {
+    background: var(--color-trans-light);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--gray-100);
+    border-radius: 8px;
+    box-shadow: 0 0 4px 0px var(--shadow-2);
+    font-size: 13px;
+    user-select: auto;
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--gray-200);
+    }
+
+    .panel-title {
+      color: var(--gray-1000);
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .panel-body {
+      padding: 10px 14px;
+    }
+  }
+
+  .graph-stats-panel {
     display: flex;
     align-items: center;
     gap: 16px;
     padding: 6px 12px;
-    background: var(--color-trans-light);
-    border: 1px solid var(--color-border-secondary);
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-    pointer-events: auto;
-    z-index: 10;
-    font-size: 13px;
-    backdrop-filter: blur(4px);
 
     .stat-item {
       display: flex;
       align-items: center;
       gap: 4px;
+      padding: 2px 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      font: inherit;
+      line-height: 1.4;
+
+      &:hover,
+      &.active {
+        .stat-label,
+        .stat-value {
+          color: var(--main-color);
+        }
+      }
 
       .stat-label {
         color: var(--color-text-secondary);
@@ -553,6 +720,57 @@ defineExpose({
         font-size: 11px;
       }
     }
+  }
+
+  .type-stats-card {
+    width: 220px;
+    max-width: calc(100vw - 40px);
+    overflow: hidden;
+  }
+
+  .type-stats-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .type-stats-row {
+    display: grid;
+    grid-template-columns: 12px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 28px;
+    padding: 4px 6px;
+    border-radius: 6px;
+
+    &:hover {
+      background: var(--gray-50);
+    }
+  }
+
+  .type-color {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px var(--color-bg-container), 0 0 0 2px var(--gray-200);
+  }
+
+  .type-name {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--gray-800);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .type-count {
+    color: var(--gray-1000);
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 
   .slots {
