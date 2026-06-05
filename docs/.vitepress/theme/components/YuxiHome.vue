@@ -65,7 +65,7 @@ const engineTabs = [
   {
     key: 'parse', icon: 'scan', title: '多格式解析',
     desc: 'MinerU、PaddleX、RapidOCR 统一解析 PDF、Office、图片等为结构化 Markdown。',
-    shot: ''
+    shot: 'https://xerrors.oss-cn-shanghai.aliyuncs.com/github/image-20260605205221908.png'
   },
   {
     key: 'retrieval', icon: 'database', title: 'Agentic RAG',

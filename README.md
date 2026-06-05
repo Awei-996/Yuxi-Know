@@ -1,7 +1,7 @@
 <div align="center">
 <h1>语析 Yuxi</h1>
 
-<p><strong>融合 RAG 与知识图谱的多租户智能体平台</strong><br/>让企业知识可被智能体检索、推理与交付</p>
+<p><strong>多租户 Harness + 企业知识库</strong><br/>让企业知识可被智能体检索、推理与交付</p>
 
 [![](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=ffffff)](https://github.com/xerrors/Yuxi/blob/main/docker-compose.yml)
 [![](https://img.shields.io/github/issues/xerrors/Yuxi?color=F48D73)](https://github.com/xerrors/Yuxi/issues)

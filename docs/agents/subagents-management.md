@@ -8,6 +8,7 @@ Yuxi 的子智能体是 Agent-backed 形态：它仍然是 `agents` 表中的一
 
 当任务复杂、需要分工处理时，主 Agent 可以通过 `task` 工具把一个子任务交给子智能体。例如：
 
+- 通用型子任务：交给内置 `general-purpose` 子智能体，使用默认运行配置处理分析、整理、写作或文件处理。
 - 研究型子任务：聚焦检索和资料整理。
 - 评审型子任务：对草稿进行结构和质量审查。
 - 领域型子任务：使用指定模型、工具、知识库或 Skills 处理特定领域问题。
@@ -25,15 +26,16 @@ Yuxi 的子智能体是 Agent-backed 形态：它仍然是 `agents` 表中的一
 
 ### 如何让主 Agent 调用子智能体
 
-仅创建子智能体不会让它自动参与运行。需要编辑主 Agent，在 runtime config 的“子智能体”字段中选择允许调用的子智能体。
+主 Agent 会通过 runtime config 的“子智能体”字段确定 `task` 工具可调用的子智能体范围。
 
 `subagents` 字段表示当前主 Agent 的允许列表：
 
-- 未选择时表示不启用子智能体。
+- 未选择或保存空列表时，默认启用当前用户可见的全部子智能体，包括内置 `general-purpose`。
+- 显式选择后，只允许调用所选子智能体。
 - 只会调用当前用户可访问且 `is_subagent=true` 的 Agent。
 - 每个子智能体使用自己的 `config_json.context`，包括模型、工具、知识库、MCP、Skills 和系统提示词。
 
-这和工具、知识库、MCP、Skills 的默认全量语义不同：这些资源未显式配置时会默认启用当前用户可访问的全部资源，但子智能体必须显式选择。
+内置 `general-purpose` 的 `config_json.context` 为空，运行时会按 `SubAgentContext` 和 `BaseContext` 默认值解析模型、工具、知识库、MCP 与 Skills。
 
 ## 开发者视角
 
@@ -63,7 +65,7 @@ Yuxi 的子智能体是 Agent-backed 形态：它仍然是 `agents` 表中的一
 
 ### 运行时调用链
 
-主 Agent 构图时，如果 `context.subagents` 非空，会挂载 Yuxi 的 task middleware。middleware 会把允许的子智能体列表注入模型提示，并暴露一个 `task` 工具。
+主 Agent 构图时，会先把 `context.subagents` 归一化为当前用户可见的允许列表；允许列表非空时挂载 Yuxi 的 task middleware。middleware 会把允许的子智能体列表注入模型提示，并暴露一个 `task` 工具。
 
 工具参数为：
 
@@ -78,7 +80,7 @@ class TaskToolSchema(BaseModel):
 
 执行时的关键流程：
 
-1. 从父 Agent 的 `context.subagents` 读取允许的子智能体 slug。
+1. 从父 Agent 的 `context.subagents` 读取允许的子智能体 slug；未显式配置或空列表会展开为当前用户可见的全部子智能体。
 2. 使用 `AgentRepository` 加载当前用户可见且 `is_subagent=true` 的 Agent。
 3. 新任务会为本次调用生成 child checkpoint thread id，例如 `<parent_thread_id>_sub_<slug>_<uuid8>`；续跑任务会校验并复用传入的 `thread_id`。
 4. 使用子智能体自己的 `SubAgentContext` 和 `config_json.context` 构建真实 Agent graph。
@@ -104,7 +106,7 @@ class TaskToolSchema(BaseModel):
 
 ### 为什么创建了子智能体，主 Agent 仍不会调用？
 
-需要在主 Agent 的 runtime config 中显式选择该子智能体。`subagents` 为空时不会启用 task 工具。
+主 Agent 只会调用当前用户可访问的子智能体。如果主 Agent 显式保存了子智能体允许列表，新建子智能体需要被加入该列表；未显式配置或空列表会使用当前用户可见的全部子智能体。
 
 ### 为什么聊天 Agent 列表里看不到子智能体？
 

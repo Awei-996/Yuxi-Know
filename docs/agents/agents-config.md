@@ -87,7 +87,7 @@ class MyAgent(BaseAgent):
 
 `tools`、`knowledges`、`mcps`、`skills` 在未显式配置时会默认启用当前用户可访问的全部资源。
 
-`ChatBotContext` 在 `BaseContext` 之上增加 `subagents` 字段，表示当前主 Agent 允许调用的子智能体。`subagents` 不使用默认全量语义，未显式选择时表示不启用子智能体。
+`ChatBotContext` 在 `BaseContext` 之上增加 `subagents` 字段，表示当前主 Agent 允许调用的子智能体。`subagents` 未显式配置或保存空列表时会默认启用当前用户可见的全部子智能体；显式选择后则作为允许列表过滤。
 
 `SubAgentContext` 在 `BaseContext` 之上增加 `parent_thread_id`、`file_thread_id`、`skills_thread_id` 与 `is_subagent_runtime` 等隐藏运行态字段，不包含 `subagents`，因此子智能体不能继续配置下一层子智能体。
 
@@ -222,7 +222,7 @@ config_json.context + runtime ids -> context_schema instance
 - 可调用子智能体列表：`context.subagents`
 - 摘要阈值：`context.summary_threshold`
 
-因此 Graph 不是和 Context 解耦的。相反，Graph 的构造本身就依赖 Context。普通 Agent 在 `context.subagents` 非空时会挂载 Yuxi 的 task middleware；`SubAgentBackend` 自身隐藏并清空 `subagents` 字段，因此子智能体不会继续调用子智能体。
+因此 Graph 不是和 Context 解耦的。相反，Graph 的构造本身就依赖 Context。普通 Agent 在归一化后的 `context.subagents` 非空时会挂载 Yuxi 的 task middleware；`SubAgentBackend` 自身隐藏并清空 `subagents` 字段，因此子智能体不会继续调用子智能体。
 
 ### 4.4 Graph 构建与中间件运行阶段
 
